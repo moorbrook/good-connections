@@ -764,3 +764,60 @@ raw v9 action goal has not replicated. The next architecture search should
 improve fill evidence or calibrated attribute uncertainty in the visual
 specialist itself, then reuse the exact differentiable relation layer; further
 heads over the current frozen evidence are not justified by these results.
+
+**Fill-error localization.** `analyze_fill_errors.py` measured the frozen
+uniform ensemble on 8,192 mixed boards (`2026081902`): 98.7579% fill accuracy,
+or 1,221 errors in 98,304 card appearances. Of those, 1,215 were
+striped-versus-open confusions. Solid fill was 99.9817% accurate, while striped
+and open were 98.1874% and 98.1012%. The worst capture profile was `crop-w79`
+at 7.2034%. Four hundred thirty-seven cards were wrong in at least three of the
+four models, so averaging alone could not remove the shared low-resolution
+failure.
+
+Two targeted candidates were rejected. Adding 80 low-resolution training
+atlases improved `crop-w79` but reduced matched aggregate fill accuracy from
+98.4833% to 98.3632%. Replacing the shared 5x5 stride-2 convolution with a 3x3
+stride-2 convolution passed Rust/MPSGraph parity but reduced fill accuracy to
+97.7244% and raw board accuracy to 92.6270%. The rejected kernel topology was
+removed rather than retained as a dormant implementation.
+
+**Fill-only texture branch.** A new opt-in research policy keeps the baseline
+encoder and specialists, then adds a raw-RGB fill residual:
+3x3 stride 1, two 3x3 stride-2 convolutions, a projection, and a three-logit
+classifier. Its logits are added only to the standard fill specialist, so the
+branch cannot directly alter count, colour, or shape. The final searched width
+is 8 convolution channels and a 24-unit projection, for 55,155 total policy
+parameters versus 44,448 in the typed baseline. The browser-deployed policy
+type and checkpoint contract remain unchanged.
+
+The narrower 4/12 branch passed parity at 47,211 parameters and improved a
+four-model uniform ensemble from 96.0693% to 96.8872% raw action and from
+98.7579% to 99.0346% fill accuracy on the matched 8,192-board stream. Its
+frozen contextual action ensemble reached only 98.7793%, so capacity was the
+next predeclared search axis. The 8/24 branch passed the one-step parity gate:
+MPSGraph probe loss `16.082127`, FrankenTorch loss `16.082128620`, and matching
+sampled shared gradients. A single controlled replica reached 96.8628% raw
+action and 99.0112% fill accuracy. Four locked replicas reached 97.2900% raw
+action and 99.2544% fill accuracy. Applying the existing frozen contextual
+recipe to its untouched 4,096-board half produced 39 failures: **99.0479%**
+overall, 99.3652% Has SET, and 98.7305% No SET. This is an exposed architecture
+selection result, not the replication.
+
+**Disjoint 190xx replication.** The 8/24 topology, uniform model weights,
+training seeds, and contextual recipe were frozen, then evaluated on the
+disjoint `board-v8-sealed-atlases` render family with board seed `2026081903`.
+Before contextual correction the ensemble reached 98.1812% raw action and
+99.5880% fill accuracy. On the untouched 4,096-board half, the development-
+selected hypergraph action ensemble reached **99.2188%** overall at 100%
+coverage: 99.4629% Has SET and 98.9746% No SET, or 32 total failures. This is
+the first honest replication of the v9 overall 99% raw-action goal. The No SET
+conditional missed a separate 99% conditional gate by one error, so the
+stricter three-way promotion gate remains open. A secondary frozen blend
+reported 99.3896% overall, 99.6582% Has SET, and 99.1211% No SET, but it was not
+the development-selected crossing and is not used as the primary claim.
+
+The fill branch is retained as a real visual improvement. The contextual and
+hypergraph readers remain clearly named NumPy research harnesses; they are not
+yet the Rust browser policy. The next implementation milestone is to port the
+frozen differentiable relation/correction path, then validate the complete
+runtime policy without relaxing the conditional gate.

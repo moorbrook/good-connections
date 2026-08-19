@@ -20,6 +20,9 @@ const WIDE_SPECIALIST_EMBED_DIM: usize = 48;
 const CONV_OUTPUT_HEIGHT: usize = 6;
 const CONV_OUTPUT_WIDTH: usize = 8;
 const SPECIALIST_FEATURES: usize = SPECIALIST_CHANNELS * CONV_OUTPUT_HEIGHT * CONV_OUTPUT_WIDTH;
+const FILL_TEXTURE_CHANNELS: usize = 8;
+const FILL_TEXTURE_EMBED_DIM: usize = 24;
+const FILL_TEXTURE_FEATURES: usize = FILL_TEXTURE_CHANNELS * CONV_OUTPUT_HEIGHT * CONV_OUTPUT_WIDTH;
 
 #[derive(Debug)]
 pub struct BoardScores {
@@ -341,12 +344,106 @@ impl<const SHARED_CHANNELS: usize, const HEAD_CHANNELS: usize, const EMBED_DIM: 
     }
 }
 
+/// A small fill-only residual branch that detects texture before the shared
+/// stride-2 encoder. It refines fill logits without changing count, colour,
+/// shape, or the standard fill specialist.
+struct FillTextureHead {
+    fine_convolution: Conv2d,
+    downsample_convolution_1: Conv2d,
+    downsample_convolution_2: Conv2d,
+    projection: Linear,
+    classifier: Linear,
+}
+
+impl FillTextureHead {
+    fn new(session: &mut FrankenTorchSession) -> Result<Self, AutogradError> {
+        Ok(Self {
+            fine_convolution: Conv2d::new(
+                session,
+                CHANNELS,
+                FILL_TEXTURE_CHANNELS,
+                (3, 3),
+                (1, 1),
+                (1, 1),
+                true,
+            )?,
+            downsample_convolution_1: Conv2d::new(
+                session,
+                FILL_TEXTURE_CHANNELS,
+                FILL_TEXTURE_CHANNELS,
+                (3, 3),
+                (2, 2),
+                (1, 1),
+                true,
+            )?,
+            downsample_convolution_2: Conv2d::new(
+                session,
+                FILL_TEXTURE_CHANNELS,
+                FILL_TEXTURE_CHANNELS,
+                (3, 3),
+                (2, 2),
+                (1, 1),
+                true,
+            )?,
+            projection: Linear::new(session, FILL_TEXTURE_FEATURES, FILL_TEXTURE_EMBED_DIM, true)?,
+            classifier: Linear::new(session, FILL_TEXTURE_EMBED_DIM, ATTRIBUTE_VALUE_COUNT, true)?,
+        })
+    }
+}
+
+impl Module for FillTextureHead {
+    fn forward(
+        &self,
+        session: &mut FrankenTorchSession,
+        input: TensorNodeId,
+    ) -> Result<TensorNodeId, AutogradError> {
+        let card_count = session.tensor_shape(input)?[0];
+        let encoded = self.fine_convolution.forward(session, input)?;
+        let encoded = session.tensor_gelu(encoded)?;
+        let encoded = self.downsample_convolution_1.forward(session, encoded)?;
+        let encoded = session.tensor_gelu(encoded)?;
+        let encoded = self.downsample_convolution_2.forward(session, encoded)?;
+        finish_attribute_head(
+            session,
+            encoded,
+            card_count,
+            FILL_TEXTURE_FEATURES,
+            &self.projection,
+            &self.classifier,
+        )
+    }
+
+    fn parameters(&self) -> Vec<TensorNodeId> {
+        self.named_children()
+            .into_iter()
+            .flat_map(|(_, module)| module.parameters())
+            .collect()
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module)> {
+        vec![
+            ("fine_convolution".to_string(), &self.fine_convolution),
+            (
+                "downsample_convolution_1".to_string(),
+                &self.downsample_convolution_1,
+            ),
+            (
+                "downsample_convolution_2".to_string(),
+                &self.downsample_convolution_2,
+            ),
+            ("projection".to_string(), &self.projection),
+            ("classifier".to_string(), &self.classifier),
+        ]
+    }
+}
+
 /// Shared topology-independent implementation for the deployed and research
 /// policy wrappers. The wrapper's attribute-head type determines the exported
 /// state-dict key family, so strict loading cannot silently mix topologies.
 struct PolicyCore<H, const RELATION_CLASSES: usize, const SHARED_CHANNELS: usize> {
     shared_convolution: Conv2d,
     attribute_heads: [H; ATTRIBUTE_COUNT],
+    fill_texture_head: Option<FillTextureHead>,
     attribute_relation_in: Linear,
     attribute_relation_out: Linear,
     set_relation_in: Linear,
@@ -357,6 +454,17 @@ impl<H: Module, const RELATION_CLASSES: usize, const SHARED_CHANNELS: usize>
     PolicyCore<H, RELATION_CLASSES, SHARED_CHANNELS>
 {
     fn new<F>(session: &mut FrankenTorchSession, mut head_new: F) -> Result<Self, AutogradError>
+    where
+        F: FnMut(&mut FrankenTorchSession) -> Result<H, AutogradError>,
+    {
+        Self::new_with_fill_texture(session, &mut head_new, false)
+    }
+
+    fn new_with_fill_texture<F>(
+        session: &mut FrankenTorchSession,
+        mut head_new: F,
+        fill_texture: bool,
+    ) -> Result<Self, AutogradError>
     where
         F: FnMut(&mut FrankenTorchSession) -> Result<H, AutogradError>,
     {
@@ -376,6 +484,11 @@ impl<H: Module, const RELATION_CLASSES: usize, const SHARED_CHANNELS: usize>
                 head_new(session)?,
                 head_new(session)?,
             ],
+            fill_texture_head: if fill_texture {
+                Some(FillTextureHead::new(session)?)
+            } else {
+                None
+            },
             attribute_relation_in: Linear::new(
                 session,
                 ATTRIBUTE_VALUE_COUNT,
@@ -440,16 +553,21 @@ impl<H: Module, const RELATION_CLASSES: usize, const SHARED_CHANNELS: usize>
         input: TensorNodeId,
         card_count: usize,
     ) -> Result<TensorNodeId, AutogradError> {
-        let encoded =
+        let pixels =
             session.tensor_reshape(input, vec![card_count, CARD_HEIGHT, CARD_WIDTH, CHANNELS])?;
-        let encoded = session.tensor_permute(encoded, vec![0, 3, 1, 2])?;
+        let pixels = session.tensor_permute(pixels, vec![0, 3, 1, 2])?;
+        let encoded = pixels;
         let encoded = self.shared_convolution.forward(session, encoded)?;
         let encoded = session.tensor_gelu(encoded)?;
-        let attribute_logits = self
+        let mut attribute_logits = self
             .attribute_heads
             .iter()
             .map(|head| head.forward(session, encoded))
             .collect::<Result<Vec<_>, _>>()?;
+        if let Some(fill_texture_head) = &self.fill_texture_head {
+            let texture_logits = fill_texture_head.forward(session, pixels)?;
+            attribute_logits[3] = session.tensor_add(attribute_logits[3], texture_logits)?;
+        }
         session.tensor_cat(&attribute_logits, 1)
     }
 
@@ -597,6 +715,12 @@ impl<H: Module, const RELATION_CLASSES: usize, const SHARED_CHANNELS: usize> Mod
                 .enumerate()
                 .map(|(index, head)| (format!("attribute_head_{index}"), head as &dyn Module)),
         );
+        if let Some(fill_texture_head) = &self.fill_texture_head {
+            children.push((
+                "fill_texture_head".to_string(),
+                fill_texture_head as &dyn Module,
+            ));
+        }
         children
     }
 }
@@ -686,6 +810,17 @@ pub struct TypedRelationResearchPolicy {
     >,
 }
 
+/// V9 fill-frequency candidate. The standard typed policy is retained and a
+/// small raw-pixel texture branch adds a residual only to the three fill
+/// logits.
+pub struct FillTextureTypedRelationResearchPolicy {
+    core: PolicyCore<
+        ResearchAttributeHead<CONV_CHANNELS, SPECIALIST_CHANNELS, SPECIALIST_EMBED_DIM>,
+        RELATION_CLASS_COUNT,
+        CONV_CHANNELS,
+    >,
+}
+
 /// V9 width-search candidate. It keeps the typed relation and SET heads but
 /// doubles the shared channels, specialist channels, and specialist embedding
 /// width. The distinct Rust type and strict tensor shapes prevent accidental
@@ -734,6 +869,61 @@ impl TypedRelationResearchPolicy {
         card_count: usize,
     ) -> Result<BoardScores, PolicyError> {
         self.core.score_board(session, pixels, card_count)
+    }
+}
+
+impl fmt::Debug for FillTextureTypedRelationResearchPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FillTextureTypedRelationResearchPolicy")
+            .field("input", &(CARD_HEIGHT, CARD_WIDTH, CHANNELS))
+            .field("fill_texture_channels", &FILL_TEXTURE_CHANNELS)
+            .field("fill_texture_embedding_width", &FILL_TEXTURE_EMBED_DIM)
+            .field("relation_classes", &RELATION_CLASS_COUNT)
+            .finish_non_exhaustive()
+    }
+}
+
+impl FillTextureTypedRelationResearchPolicy {
+    pub fn new(session: &mut FrankenTorchSession) -> Result<Self, AutogradError> {
+        Ok(Self {
+            core: PolicyCore::new_with_fill_texture(session, ResearchAttributeHead::new, true)?,
+        })
+    }
+
+    pub fn forward_with_relations(
+        &self,
+        session: &mut FrankenTorchSession,
+        input: TensorNodeId,
+    ) -> Result<(TensorNodeId, TensorNodeId, TensorNodeId), AutogradError> {
+        self.core.forward_with_relations(session, input)
+    }
+
+    pub fn score_board(
+        &self,
+        session: &mut FrankenTorchSession,
+        pixels: Vec<f64>,
+        card_count: usize,
+    ) -> Result<BoardScores, PolicyError> {
+        self.core.score_board(session, pixels, card_count)
+    }
+}
+
+impl Module for FillTextureTypedRelationResearchPolicy {
+    fn forward(
+        &self,
+        session: &mut FrankenTorchSession,
+        input: TensorNodeId,
+    ) -> Result<TensorNodeId, AutogradError> {
+        self.core.forward(session, input)
+    }
+
+    fn parameters(&self) -> Vec<TensorNodeId> {
+        self.core.parameters()
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module)> {
+        self.core.named_children()
     }
 }
 
@@ -880,9 +1070,9 @@ mod tests {
     use ft_nn::Module;
 
     use super::{
-        ATTRIBUTE_COUNT, BoardScores, CARD_PIXELS, DeployedVisualSetPolicy, PolicyError,
-        RawBoardAction, ResearchVisualSetPolicy, TypedRelationResearchPolicy,
-        WideTypedRelationResearchPolicy,
+        ATTRIBUTE_COUNT, BoardScores, CARD_PIXELS, DeployedVisualSetPolicy,
+        FillTextureTypedRelationResearchPolicy, PolicyError, RawBoardAction,
+        ResearchVisualSetPolicy, TypedRelationResearchPolicy, WideTypedRelationResearchPolicy,
     };
 
     #[test]
@@ -1053,6 +1243,18 @@ mod tests {
                 .load_state_dict(&mut typed_session, &wide_state, true)
                 .is_err()
         );
+
+        let mut texture_session = FrankenTorchSession::new(ExecutionMode::Strict);
+        let texture = FillTextureTypedRelationResearchPolicy::new(&mut texture_session)?;
+        let texture_state = texture.state_dict(&texture_session)?;
+        assert!(texture_state.contains_key("fill_texture_head.fine_convolution.weight"));
+        assert!(texture_state.contains_key("fill_texture_head.classifier.weight"));
+        assert!(
+            typed
+                .load_state_dict(&mut typed_session, &texture_state, true)
+                .is_err()
+        );
+
         Ok(())
     }
 }

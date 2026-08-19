@@ -9,8 +9,9 @@ use ft_nn::{BCEWithLogitsLoss, CrossEntropyLoss, LossModule, Module};
 use ft_optim::{AdamW, Optimizer};
 use set_vision_data::{AtlasCollection, BoardKind, Rng, decode_card};
 use set_vision_policy::{
-    BoardDecision, BoardScores, CARD_PIXELS, RawBoardAction, ResearchVisualSetPolicy,
-    TypedRelationResearchPolicy, WideTypedRelationResearchPolicy,
+    BoardDecision, BoardScores, CARD_PIXELS, FillTextureTypedRelationResearchPolicy,
+    RawBoardAction, ResearchVisualSetPolicy, TypedRelationResearchPolicy,
+    WideTypedRelationResearchPolicy,
 };
 use std::io::Write;
 
@@ -69,6 +70,7 @@ enum ResearchPolicyVariant {
     Legacy(ResearchVisualSetPolicy),
     Typed(TypedRelationResearchPolicy),
     WideTyped(WideTypedRelationResearchPolicy),
+    FillTextureTyped(FillTextureTypedRelationResearchPolicy),
 }
 
 impl ResearchPolicyVariant {
@@ -76,9 +78,12 @@ impl ResearchPolicyVariant {
         session: &mut FrankenTorchSession,
         typed_relations: bool,
         wide_vision: bool,
+        fill_texture_branch: bool,
     ) -> Result<Self, ft_autograd::AutogradError> {
         if wide_vision {
             WideTypedRelationResearchPolicy::new(session).map(Self::WideTyped)
+        } else if fill_texture_branch {
+            FillTextureTypedRelationResearchPolicy::new(session).map(Self::FillTextureTyped)
         } else if typed_relations {
             TypedRelationResearchPolicy::new(session).map(Self::Typed)
         } else {
@@ -119,6 +124,15 @@ impl ResearchPolicyVariant {
                     relations: Some(relation_logits),
                 })
             }
+            Self::FillTextureTyped(policy) => {
+                let (set_logits, attribute_logits, relation_logits) =
+                    policy.forward_with_relations(session, input)?;
+                Ok(PolicyOutputs {
+                    set: set_logits,
+                    attributes: attribute_logits,
+                    relations: Some(relation_logits),
+                })
+            }
         }
     }
 
@@ -132,6 +146,7 @@ impl ResearchPolicyVariant {
             Self::Legacy(policy) => policy.score_board(session, pixels, card_count),
             Self::Typed(policy) => policy.score_board(session, pixels, card_count),
             Self::WideTyped(policy) => policy.score_board(session, pixels, card_count),
+            Self::FillTextureTyped(policy) => policy.score_board(session, pixels, card_count),
         }
     }
 }
@@ -146,6 +161,7 @@ impl Module for ResearchPolicyVariant {
             Self::Legacy(policy) => policy.forward(session, input),
             Self::Typed(policy) => policy.forward(session, input),
             Self::WideTyped(policy) => policy.forward(session, input),
+            Self::FillTextureTyped(policy) => policy.forward(session, input),
         }
     }
 
@@ -154,6 +170,7 @@ impl Module for ResearchPolicyVariant {
             Self::Legacy(policy) => policy.parameters(),
             Self::Typed(policy) => policy.parameters(),
             Self::WideTyped(policy) => policy.parameters(),
+            Self::FillTextureTyped(policy) => policy.parameters(),
         }
     }
 
@@ -162,6 +179,7 @@ impl Module for ResearchPolicyVariant {
             Self::Legacy(policy) => policy.named_children(),
             Self::Typed(policy) => policy.named_children(),
             Self::WideTyped(policy) => policy.named_children(),
+            Self::FillTextureTyped(policy) => policy.named_children(),
         }
     }
 }
@@ -196,8 +214,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = Rng::new(config.seed);
 
     let mut session = FrankenTorchSession::new(ExecutionMode::Strict);
-    let model =
-        ResearchPolicyVariant::new(&mut session, config.typed_relations, config.wide_vision)?;
+    let model = ResearchPolicyVariant::new(
+        &mut session,
+        config.typed_relations,
+        config.wide_vision,
+        config.fill_texture_branch,
+    )?;
     if config.eval_only || config.probe_only {
         let checkpoint = config.output_dir.join("set-vision.ftsv");
         let state = ft_serialize::load_state_dict(&checkpoint)?;
@@ -211,6 +233,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mut ensemble_session,
             config.typed_relations,
             config.wide_vision,
+            config.fill_texture_branch,
         )?;
         let checkpoint = output_dir.join("set-vision.ftsv");
         let state = ft_serialize::load_state_dict(&checkpoint)?;
@@ -224,6 +247,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &mut third_session,
                 config.typed_relations,
                 config.wide_vision,
+                config.fill_texture_branch,
             )?;
             let third_checkpoint = third_output_dir.join("set-vision.ftsv");
             let third_state = ft_serialize::load_state_dict(&third_checkpoint)?;
@@ -243,6 +267,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &mut fourth_session,
                 config.typed_relations,
                 config.wide_vision,
+                config.fill_texture_branch,
             )?;
             let fourth_checkpoint = fourth_output_dir.join("set-vision.ftsv");
             let fourth_state = ft_serialize::load_state_dict(&fourth_checkpoint)?;

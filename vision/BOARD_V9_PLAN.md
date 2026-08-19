@@ -109,3 +109,20 @@ improve the visual fill specialist or its uncertainty calibration before the
 fixed differentiable relation layer. The large NumPy probes are research
 harnesses only; they are not the browser architecture and are named separately
 to avoid implying otherwise.
+
+The subsequent fill-error audit localized almost every residual fill mistake
+to striped-versus-open texture, especially at 79-pixel source width. A retained
+fill-only texture branch now reads raw RGB before the shared stride-2 encoder
+and adds residual logits only to fill. A searched 8-channel/24-unit version has
+55,155 parameters and exact Rust/MPSGraph parity. Across four fixed replicas it
+improved the matched ensemble to 99.2544% fill accuracy and 97.2900% native raw
+board accuracy.
+
+With the pre-existing contextual/hypergraph recipe frozen, the exposed stream
+reached 99.0479% action accuracy. A disjoint replication using the 190xx render
+family and board seed `2026081903` reached 99.2188% overall at 100% coverage
+(99.4629% Has SET, 98.9746% No SET). The overall 99% goal has therefore
+replicated, but the stricter conditional gate remains open by one No SET error.
+The texture branch is implemented in Rust and MPSGraph; the contextual reader
+that produces the replicated result remains a research harness and must be
+ported before this can become the browser policy.

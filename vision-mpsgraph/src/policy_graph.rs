@@ -19,6 +19,10 @@ const HEAD_EMBED: usize = 24;
 const WIDE_SHARED_CHANNELS: usize = 24;
 const WIDE_HEAD_CHANNELS: usize = 16;
 const WIDE_HEAD_EMBED: usize = 48;
+const FILL_TEXTURE_CHANNELS: usize = 8;
+const FILL_TEXTURE_EMBED: usize = 24;
+const CONV_OUTPUT_HEIGHT: usize = 6;
+const CONV_OUTPUT_WIDTH: usize = 8;
 
 pub struct Parameter {
     pub name: String,
@@ -227,6 +231,7 @@ impl PolicyGraph {
         typed_relations: bool,
         negative_logsumexp_loss_weight: f32,
         wide_vision: bool,
+        fill_texture_branch: bool,
         fill_loss_multiplier: f32,
     ) -> Self {
         let mut builder = Builder::new(init_seed);
@@ -309,6 +314,68 @@ impl PolicyGraph {
                 head_embed,
                 ATTRIBUTE_VALUE_COUNT,
             ));
+        }
+        if fill_texture_branch {
+            let texture = builder.convolution(
+                "fill_texture_head.fine_convolution",
+                &pixels,
+                ConvolutionSpec {
+                    input_channels: CHANNELS,
+                    output_channels: FILL_TEXTURE_CHANNELS,
+                    kernel: 3,
+                    stride: 1,
+                    padding: 1,
+                    dilation: 1,
+                },
+            );
+            let texture = builder.activation(&texture);
+            let texture = builder.convolution(
+                "fill_texture_head.downsample_convolution_1",
+                &texture,
+                ConvolutionSpec {
+                    input_channels: FILL_TEXTURE_CHANNELS,
+                    output_channels: FILL_TEXTURE_CHANNELS,
+                    kernel: 3,
+                    stride: 2,
+                    padding: 1,
+                    dilation: 1,
+                },
+            );
+            let texture = builder.activation(&texture);
+            let texture = builder.convolution(
+                "fill_texture_head.downsample_convolution_2",
+                &texture,
+                ConvolutionSpec {
+                    input_channels: FILL_TEXTURE_CHANNELS,
+                    output_channels: FILL_TEXTURE_CHANNELS,
+                    kernel: 3,
+                    stride: 2,
+                    padding: 1,
+                    dilation: 1,
+                },
+            );
+            let texture = builder.activation(&texture);
+            let texture = builder.reshape(
+                &texture,
+                &[
+                    CARD_COUNT,
+                    FILL_TEXTURE_CHANNELS * CONV_OUTPUT_HEIGHT * CONV_OUTPUT_WIDTH,
+                ],
+            );
+            let texture = builder.linear(
+                "fill_texture_head.projection",
+                &texture,
+                FILL_TEXTURE_CHANNELS * CONV_OUTPUT_HEIGHT * CONV_OUTPUT_WIDTH,
+                FILL_TEXTURE_EMBED,
+            );
+            let texture = builder.activation(&texture);
+            let texture = builder.linear(
+                "fill_texture_head.classifier",
+                &texture,
+                FILL_TEXTURE_EMBED,
+                ATTRIBUTE_VALUE_COUNT,
+            );
+            heads[3] = builder.add(&heads[3], &texture);
         }
         let head_refs = heads.iter().map(|tensor| &**tensor).collect::<Vec<_>>();
         let attributes = builder.concat(&head_refs, 1);

@@ -35,6 +35,7 @@ pub(crate) struct TrainConfig {
     pub(crate) mixed_boards: bool,
     pub(crate) board_correlated_negatives: bool,
     pub(crate) wide_vision: bool,
+    pub(crate) fill_texture_branch: bool,
 }
 
 impl Default for TrainConfig {
@@ -73,6 +74,7 @@ impl Default for TrainConfig {
             mixed_boards: false,
             board_correlated_negatives: false,
             wide_vision: false,
+            fill_texture_branch: false,
         }
     }
 }
@@ -116,6 +118,7 @@ impl TrainConfig {
                 "--mixed-boards" => config.mixed_boards = true,
                 "--board-correlated-negatives" => config.board_correlated_negatives = true,
                 "--wide-vision" => config.wide_vision = true,
+                "--fill-texture-branch" => config.fill_texture_branch = true,
                 "--atlas-dir" => config.atlas_dir = PathBuf::from(next_value(&mut args, &flag)?),
                 "--validation-atlas-dir" => {
                     config.validation_atlas_dir = PathBuf::from(next_value(&mut args, &flag)?);
@@ -194,6 +197,14 @@ impl TrainConfig {
         }
         if self.wide_vision && !self.typed_relations {
             return Err("--wide-vision requires --typed-relations".to_string());
+        }
+        if self.fill_texture_branch && !self.typed_relations {
+            return Err("--fill-texture-branch requires --typed-relations".to_string());
+        }
+        if self.fill_texture_branch && self.wide_vision {
+            return Err(
+                "--fill-texture-branch and --wide-vision are mutually exclusive".to_string(),
+            );
         }
         if self.export_board_evidence && !self.typed_relations {
             return Err("--export-board-evidence requires --typed-relations".to_string());
@@ -295,7 +306,7 @@ impl TrainConfig {
          [--learning-rate RATE] [--attribute-loss-weight WEIGHT] [--seed N] [--atlas-dir PATH] \
          [--fill-loss-multiplier MULTIPLIER] \
          [--relation-loss-weight WEIGHT] [--negative-logsumexp-loss-weight WEIGHT] \
-         [--typed-relations] [--mixed-boards] [--board-correlated-negatives] [--wide-vision] \
+         [--typed-relations] [--mixed-boards] [--board-correlated-negatives] [--wide-vision] [--fill-texture-branch] \
          [--export-board-evidence] \
          [--validation-atlas-dir PATH] [--output-dir PATH] [--eval-only] \
          [--ensemble-output-dir PATH] \
@@ -447,6 +458,18 @@ mod tests {
         let untyped_wide = ["--wide-vision"].into_iter().map(str::to_string);
         assert!(TrainConfig::from_iter(untyped_wide).is_err());
 
+        let untyped_texture = ["--fill-texture-branch"].into_iter().map(str::to_string);
+        assert!(TrainConfig::from_iter(untyped_texture).is_err());
+
+        let conflicting_vision = [
+            "--typed-relations",
+            "--wide-vision",
+            "--fill-texture-branch",
+        ]
+        .into_iter()
+        .map(str::to_string);
+        assert!(TrainConfig::from_iter(conflicting_vision).is_err());
+
         let untyped_export = ["--export-board-evidence"].into_iter().map(str::to_string);
         assert!(TrainConfig::from_iter(untyped_export).is_err());
 
@@ -454,6 +477,20 @@ mod tests {
             .into_iter()
             .map(str::to_string);
         assert!(TrainConfig::from_iter(invalid_fill).is_err());
+    }
+
+    #[test]
+    fn fill_texture_branch_is_an_explicit_typed_candidate() {
+        let args = ["--typed-relations", "--fill-texture-branch"]
+            .into_iter()
+            .map(str::to_string);
+        let config = TrainConfig::from_iter(args)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        assert!(config.typed_relations);
+        assert!(config.fill_texture_branch);
+        assert!(!config.wide_vision);
     }
 
     #[test]

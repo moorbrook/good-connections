@@ -38,6 +38,7 @@ struct TrainConfig {
     negative_logsumexp_loss_weight: f32,
     board_correlated_negatives: bool,
     wide_vision: bool,
+    fill_texture_branch: bool,
 }
 
 struct PreparedBatch {
@@ -302,6 +303,7 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
         negative_logsumexp_loss_weight: 0.0,
         board_correlated_negatives: false,
         wide_vision: false,
+        fill_texture_branch: false,
     };
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -332,6 +334,7 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
             }
             "--board-correlated-negatives" => config.board_correlated_negatives = true,
             "--wide-vision" => config.wide_vision = true,
+            "--fill-texture-branch" => config.fill_texture_branch = true,
             "--negative-logsumexp-loss-weight" => {
                 config.negative_logsumexp_loss_weight = arguments
                     .next()
@@ -352,7 +355,7 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
             }
             unknown => {
                 return Err(format!(
-                    "unknown argument {unknown}; usage: [--steps N] [--output PATH] [--atlas-dir PATH] [--no-augment] [--typed-relations] [--fill-loss-multiplier M] [--negative-logsumexp-loss-weight W] [--board-correlated-negatives] [--wide-vision] [--data-seed N] [--init-seed N]"
+                    "unknown argument {unknown}; usage: [--steps N] [--output PATH] [--atlas-dir PATH] [--no-augment] [--typed-relations] [--fill-loss-multiplier M] [--negative-logsumexp-loss-weight W] [--board-correlated-negatives] [--wide-vision] [--fill-texture-branch] [--data-seed N] [--init-seed N]"
                 )
                 .into());
             }
@@ -379,6 +382,12 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
     }
     if config.wide_vision && !config.typed_relations {
         return Err("--wide-vision requires --typed-relations".into());
+    }
+    if config.fill_texture_branch && !config.typed_relations {
+        return Err("--fill-texture-branch requires --typed-relations".into());
+    }
+    if config.fill_texture_branch && config.wide_vision {
+        return Err("--fill-texture-branch and --wide-vision are mutually exclusive".into());
     }
     Ok(config)
 }
@@ -509,6 +518,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         config.typed_relations,
         config.negative_logsumexp_loss_weight,
         config.wide_vision,
+        config.fill_texture_branch,
         config.fill_loss_multiplier,
     );
     println!("typed_relations: {}", config.typed_relations);
@@ -522,6 +532,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         config.board_correlated_negatives
     );
     println!("wide_vision: {}", config.wide_vision);
+    println!("fill_texture_branch: {}", config.fill_texture_branch);
     let parameter_count = policy
         .parameters
         .iter()
