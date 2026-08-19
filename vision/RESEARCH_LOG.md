@@ -490,3 +490,34 @@ traversed. After the helper was corrected and the empty header-only output was m
 research-selection overfit. Board-v7 sealed is now exposed and retired; it must not be used to tune
 weights or select the next model. Board-v8 must lock fresh procedural research and sealed seeds
 before further selection.
+
+## 2026-08-19 — Board-v8 adversarial raw-perception protocol locked
+
+Board-v8 fixes a new, evaluator-unopened research/sealed pair for the same
+99% raw board-accuracy goal at 100% coverage. It keeps the v7 eleven-profile
+matrix for controlled profile comparisons while moving to disjoint source
+widths `79/167/323` at DPR 1 and `115/281` at DPR 2. The research seeds are
+`18001–18003`; the sealed seeds are `19001–19003`. These seeds and widths were
+checked against the inspected v5/v6/v7 corpus filenames, including v7
+training, research, and sealed matrices. The occlusion profile remains a
+translucent, human-solvable band rather than an information-erasure test.
+
+Both v8 corpora contain 516 atlases, 172 per seed, with all four themes. The
+research digest is
+`4c5fcba428b7a48be8b1ab69ea6c9ac72395b2b59d1827d06fe3025cee94e62d`; the
+sealed digest is
+`9dfbbc84fc8e97c65f9070e43528be11c66073fa9e4b360ffabedd9077bfbe67`. Native
+full-deck QA covered every theme, every new profile, both width extremes, both
+DPRs, and both seed ranges. Every sample retained the 9x9 grid and intended
+capture evidence. No v8 model evaluation has run; the sealed corpus remains
+prediction-unopened.
+
+The raw research allocation is three sequential 172-atlas shards: 342/341/341
+triple batches and 2,731/2,731/2,730 boards, totaling 65,536 triples and 8,192
+boards. The locked triple RNG seeds are `287145488695021–023` and board RNG
+seeds are `294222009835245–247`. Four predeclared independent replicas must be
+combined with uniform 0.25 weights; no research-tuned ensemble weighting or
+abstention guard is permitted. Only an aggregate with at most 81 raw failures
+may receive the one-time sealed 10,000-board assessment, allocated
+3,334/3,333/3,333 across sealed seeds with board RNG seeds
+`304222009835245–247`. Full details are in `BOARD_V8_PROTOCOL.md`.
