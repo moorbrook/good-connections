@@ -1,0 +1,27 @@
+phase	candidate	weights	checkpoints	learned_parameters	triple_correct	triple_total	board_failures	board_total	raw_board_accuracy	decision
+research	control	1	1	41918	57091	65536	1453	8192	0.822631836	reject
+research	specialist-adaptive-pool	1	1	41918	55241	65536	2096	8192	0.744140625	reject
+research	specialist-dilated-residual	1	1	44254	56980	65536	1587	8192	0.806274414	reject
+research	incumbent-robust-augmentation	1	1	41918	60454	65536	1027	8192	0.874633789	reject
+research	specialist-dilated-residual-augmentation	1	1	44254	61189	65536	943	8192	0.884887695	reject
+research	specialist-dilated-residual-band-augmentation	1	1	44254	63461	65536	392	8192	0.952148438	reject
+research	specialist-dilated-profile-training	1	1	44254	61956	65536	483	8192	0.941040039	reject
+research	specialist-dilated-profile-plus-augmentation	1	1	44254	63203	65536	284	8192	0.965332031	research member
+research	specialist-dilated-profile-plus-augmentation-rep2	1	1	44254	62264	65536	418	8192	0.948974609	research member
+research	specialist-dilated-profile-plus-augmentation-rep3	1	1	44254	62765	65536	425	8192	0.948120117	research member
+research	ensemble-profile-plus-band	0.5/0.5	2	88508	64396	65536	124	8192	0.984863281	reject
+research	ensemble-w035	0.35/0.65	2	88508	64056	65536	195	8192	0.976196289	reject
+research	ensemble-w045	0.45/0.55	2	88508	64339	65536	155	8192	0.981079102	reject
+research	ensemble-w055	0.55/0.45	2	88508	64415	65536	103	8192	0.987426758	research member
+research	ensemble-w065	0.65/0.35	2	88508	63992	65536	108	8192	0.986816406	reject
+research	ensemble-profile-rep2-w080	0.8/0.2	2	88508	63362	65536	190	8192	0.976806641	reject
+research	ensemble-three-rep2-w0100	0.495/0.405/0.10	3	132762	64473	65536	90	8192	0.989013672	reject
+research	ensemble-three-rep2-w0125	0.48125/0.39375/0.125	3	132762	64478	65536	91	8192	0.988891602	reject
+research	ensemble-three-rep2-w0150	0.4675/0.3825/0.15	3	132762	64464	65536	89	8192	0.989135742	reject
+research	ensemble-three-rep2-w0200	0.44/0.36/0.20	3	132762	64414	65536	91	8192	0.988891602	reject
+research	ensemble-three-rep3-w0100	0.495/0.405/0.10	3	132762	64498	65536	87	8192	0.989379883	reject
+research	ensemble-three-rep3-w0150	0.4675/0.3825/0.15	3	132762	64420	65536	84	8192	0.989746094	reject
+research	ensemble-four-reps-w0050	0.495/0.405/0.05/0.05	4	177016	64484	65536	85	8192	0.989624023	reject
+research	ensemble-four-reps-w0075	0.4675/0.3825/0.075/0.075	4	177016	64476	65536	83	8192	0.989868164	reject
+research	ensemble-four-reps-w0100	0.44/0.36/0.10/0.10	4	177016	64418	65536	76	8192	0.990722656	selected research winner
+sealed	ensemble-four-reps-w0100	0.44/0.36/0.10/0.10	4	177016	64636	65536	122	10000	0.987800000	assessment failed 99% target; sealed retired

@@ -29,8 +29,8 @@ if [[ -e "$output_root" ]] && [[ -n "$(find "$output_root" -mindepth 1 -maxdepth
 fi
 mkdir -p "$output_root"
 
-# Each process loads one 172-atlas shard. Keep the processes sequential: the
-# point of this helper is a bounded-memory protocol, not parallel evaluation.
+# Each process evaluates one 172-atlas seed shard. Keep the processes
+# sequential so every candidate uses the same locked execution protocol.
 shard_seeds=(15001 15002 15003)
 triple_seeds=(177145488695021 177145488695022 177145488695023)
 board_seeds=(194222009835245 194222009835246 194222009835247)
@@ -40,7 +40,7 @@ shard_root=$(mktemp -d "${TMPDIR:-/tmp}/board-v7-shards.XXXXXX")
 trap 'rm -rf -- "$shard_root"' EXIT
 
 (cd "$project_root/vision" && cargo build --release --quiet)
-evaluator="$project_root/vision/target/release/set-vision"
+evaluator="$project_root/vision/target/release/set-vision-trainer"
 results="$output_root/results.tsv"
 printf 'seed\ttriple_seed\tboard_seed\teval_batches\teval_boards\ttriple_correct\ttriple_total\tboard_failures\tboard_total\tlog\n' > "$results"
 
@@ -68,9 +68,9 @@ for index in "${!shard_seeds[@]}"; do
     --board-seed "${board_seeds[$index]}" \
     --validation-atlas-dir "$shard" \
     --output-dir "$shard_output" > "$log"
-  triple_correct=$(awk -F '[:/]' '/^triple_correct:/ { print $2; exit }' "$log")
-  triple_total=$(awk -F '[:/]' '/^triple_correct:/ { print $3; exit }' "$log")
-  board_failures=$(awk -F ': ' '/^board_failures:/ { print $2; exit }' "$log")
+  triple_correct=$(awk -F '[ :/]+' '/^triple_correct:/ { print $2; exit }' "$log")
+  triple_total=$(awk -F '[ :/]+' '/^triple_correct:/ { print $3; exit }' "$log")
+  board_failures=$(awk -F '[ :/]+' '/^board_failures:/ { print $2; exit }' "$log")
   [[ "$triple_correct" =~ ^[0-9]+$ && "$triple_total" =~ ^[0-9]+$ && "$board_failures" =~ ^[0-9]+$ ]] || {
     echo "could not parse evaluator totals for seed $seed; see $log" >&2
     exit 1

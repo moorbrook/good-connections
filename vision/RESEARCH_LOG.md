@@ -445,11 +445,48 @@ matrix with seeds 16001–16003 and digest
 filename, count, dimension, and visual checks; the sealed corpus was not passed to an evaluator.
 
 The raw selection run is fixed at 1,024 triple batches and 8,192 boards, evaluated as three
-sequential 172-atlas shards so a 24 GB machine never loads the 516-atlas corpus at once. The locked
-shard allocations are 342/341/341 triple batches and 2,731/2,731/2,730 boards, with explicit triple
-and board seeds recorded in `BOARD_V7_PROTOCOL.md`; `tools/evaluate-board-v7-research-shards.sh`
-checks the corpus digest and aggregates exactly 65,536 triples and 8,192 boards. Rank by raw board
-failures, then raw triple accuracy, then parameter count. Only a candidate at or above 99% research
-accuracy (at most 81 failures in 8,192 boards) may receive the one sealed 10,000-board evaluation.
-Do not fit or apply abstention during this cycle. Full protocol details are in
-`BOARD_V7_PROTOCOL.md`.
+sequential 172-atlas shards with exact per-seed allocation. The initial memory justification for
+sharding was wrong: it used the 190x140 source-card dimensions, while `vision-contract` fixes the
+stored model input at 30x21. This was caught before candidate selection was complete. The shard
+allocation remains the locked protocol because it was fixed before the first result and balances
+all three procedural seeds. The allocations are 342/341/341 triple batches and
+2,731/2,731/2,730 boards, with explicit triple and board seeds recorded in
+`BOARD_V7_PROTOCOL.md`; `tools/evaluate-board-v7-research-shards.sh` checks the corpus digest and
+aggregates exactly 65,536 triples and 8,192 boards. Rank by raw board failures, then raw triple
+accuracy, then parameter count. Only a candidate at or above 99% research accuracy (at most 81
+failures in 8,192 boards) may receive the one sealed 10,000-board evaluation. Do not fit or apply
+abstention during this cycle. Full protocol details are in `BOARD_V7_PROTOCOL.md`.
+
+**Training corpus correction.** A first draft accidentally reused DPR2 width 121 from an older
+sealed cycle. This was caught before training. Those 40 files were discarded and replaced with
+width 139. The final board-v7 training corpus has 344 atlases, procedural seeds 17001–17002, DPR1
+widths 97/211/349, DPR2 widths 139/251, and digest
+`9e14889fccaadb7c326052884d7f13f58240fdc99439e6337c53048b98f21c64`. It has no seed or width
+overlap with board-v7 research or sealed corpora.
+
+**Architecture and augmentation search.** Raw control accuracy was 0.822632 (1,453/8,192
+failures). Adaptive pooling regressed to 0.744141. A 44,254-parameter specialist with a dilated
+residual convolution improved only after the training distribution matched the capture shifts:
+profile-corpus training plus geometric, photometric, and horizontal-band augmentation reached
+0.965332 (284 failures). The horizontal band specifically corrected the earlier edge-occlusion
+augmentation mismatch. All reported policies make an unconditional highest-score action; no guard
+or abstention score enters these results.
+
+**Independent-replica ensemble search.** Two complementary checkpoints reached 0.987427 raw
+accuracy at weights 0.55/0.45. Two further profile-trained replicas were weaker alone (0.948975 and
+0.948120), but their failures were sufficiently different to help at low weight. The predeclared
+four-checkpoint bracket produced 85 failures at weights 0.495/0.405/0.05/0.05, 83 at
+0.4675/0.3825/0.075/0.075, and 76 at 0.44/0.36/0.10/0.10. The last result is 0.990723 raw accuracy
+at 100% coverage, clearing the research gate by five failures. It was frozen as the sole research
+winner. Complete candidate results are in `BOARD_V7_RESULTS.tsv`.
+
+**One-time sealed assessment.** Before evaluation, the four weights and three sealed RNG/allocation
+rows were fixed in `BOARD_V7_PROTOCOL.md`. Two preflight invocations produced no predictions: one
+stopped because the corpus path was absent, and one stopped because the directory symlink was not
+traversed. After the helper was corrected and the empty header-only output was moved intact to
+`/tmp/good-connections-board-v7-sealed-preflight-incomplete`, the single scored sealed run produced
+122 failures in 10,000 boards: raw accuracy 0.987800 and triple accuracy 0.986267. This misses the
+99% raw goal. The research-to-sealed gap is evidence of seed-level generalization error and
+research-selection overfit. Board-v7 sealed is now exposed and retired; it must not be used to tune
+weights or select the next model. Board-v8 must lock fresh procedural research and sealed seeds
+before further selection.
