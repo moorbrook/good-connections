@@ -161,7 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 f64::from(u32::try_from(step - 1)?) / f64::from(u32::try_from(config.steps)?);
             let cosine = 1.0_f64.midpoint((std::f64::consts::PI * progress).cos());
             optimizer.set_lr(config.learning_rate * (0.05 + 0.95 * cosine));
-            let batch = atlases.make_batch(&mut rng, config.batch_size, config.augment);
+            let batch = atlases.make_training_batch(&mut rng, config.batch_size, config.augment);
             let input = session.tensor_variable(
                 batch.pixels,
                 vec![config.batch_size, 3, CARD_PIXELS],

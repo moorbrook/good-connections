@@ -474,8 +474,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     for step in 1..=steps {
         let started = Instant::now();
-        let batch =
-            prepare_batch(&atlases.make_batch(&mut rng, policy_graph::BATCH_SIZE, config.augment));
+        let batch = prepare_batch(&atlases.make_training_batch(
+            &mut rng,
+            policy_graph::BATCH_SIZE,
+            config.augment,
+        ));
         let (loss, gradients) = autoreleasepool(|_| run_policy(&policy, &device, &batch))?;
         let progress = (step - 1) as f32 / steps as f32;
         let cosine = 1.0_f32.midpoint((std::f32::consts::PI * progress).cos());
