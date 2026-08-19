@@ -456,8 +456,10 @@ Do not fit or apply abstention during this cycle. Full protocol details are in
 
 The board-v7 training-only corpus is now locked separately at
 `vision-artifacts/board-v7-training-atlases`: seeds 17001–17002, all four themes,
-DPR-1 widths 97/211/349 with all eleven profiles, and DPR-2 widths 121/251 with
+DPR-1 widths 97/211/349 with all eleven profiles, and DPR-2 widths 139/251 with
 clean/crop/shadow/tilt/occlusion. It contains 344 atlases (172 per seed), has
-digest `4a16ab365a91f041b2b14afb51c90a7e2268150bd29a4ff90c3667b7377cb5f8`, and
-was verified and visually inspected without running an evaluator. It is
-training input only; no research or sealed prediction was generated from it.
+digest `9e14889fccaadb7c326052884d7f13f58240fdc99439e6337c53048b98f21c64`, and
+was verified and visually inspected without running an evaluator. The initial
+candidate width 121 was removed before training because it appeared in the
+retired board-v5 sealed matrix. It is training input only; no research or
+sealed prediction was generated from it.
