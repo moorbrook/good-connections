@@ -23,8 +23,8 @@ esac
 
 IFS=',' read -r -a card_widths <<<"$card_widths_arg"
 for card_width in "${card_widths[@]}"; do
-  if [[ ! "$card_width" =~ ^[0-9]+$ ]] || ((card_width < 96 || card_width > 380)); then
-    echo 'Card widths must be comma-separated integers from 96 through 380' >&2
+  if [[ ! "$card_width" =~ ^[0-9]+$ ]] || ((card_width < 72 || card_width > 380)); then
+    echo 'Card widths must be comma-separated integers from 72 through 380' >&2
     exit 2
   fi
 done
@@ -32,9 +32,9 @@ done
 IFS=',' read -r -a capture_profiles <<<"$capture_profiles_arg"
 for capture_profile in "${capture_profiles[@]}"; do
   case "$capture_profile" in
-    clean|blur|crop|shadow|lowcontrast|jpeg) ;;
+    clean|blur|crop|shadow|lowcontrast|jpeg|defocus|tilt|occlusion|gamut|compound) ;;
     *)
-      echo 'Capture profiles must be comma-separated clean, blur, crop, shadow, lowcontrast, or jpeg' >&2
+      echo 'Capture profiles must be comma-separated clean, blur, crop, shadow, lowcontrast, jpeg, defocus, tilt, occlusion, gamut, or compound' >&2
       exit 2
       ;;
   esac
