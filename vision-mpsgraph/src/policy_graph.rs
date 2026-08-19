@@ -42,11 +42,11 @@ struct Builder {
 }
 
 impl Builder {
-    fn new() -> Self {
+    fn new(random_state: u64) -> Self {
         Self {
             graph: unsafe { MPSGraph::new() },
             parameters: Vec::new(),
-            random_state: 0x9e37_79b9_7f4a_7c15,
+            random_state: random_state.max(1),
         }
     }
 
@@ -199,8 +199,8 @@ impl Builder {
 }
 
 impl PolicyGraph {
-    pub fn new() -> Self {
-        let mut builder = Builder::new();
+    pub fn new(init_seed: u64) -> Self {
+        let mut builder = Builder::new(init_seed);
         let pixels = builder.placeholder(&[CARD_COUNT, CHANNELS, CARD_HEIGHT, CARD_WIDTH]);
         let set_labels = builder.placeholder(&[BATCH_SIZE, 2]);
         let attribute_labels =

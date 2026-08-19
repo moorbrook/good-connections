@@ -300,3 +300,67 @@ For later robotic grasping work, preserve the same experimental structure but do
 game's reliability transfers. Robot promotion gates must add calibrated uncertainty, distribution
 shift tests, temporal and control latency, collision constraints, safe fallback behavior, and
 hardware-in-the-loop evaluation before any autonomous action.
+
+## 2026-08-18 — Board-v5 capture robustness, replications, and abstention
+
+**Protocol reset and corpora.** Board-v5 evaluates capture-path shifts absent from board-v4. The
+research and sealed corpora each contain 240 production-rendered atlases spanning four themes,
+unseen seeds and widths, DPR 1/2, and mixtures of clean, blur, crop/zoom-in, shadow/scale-down, low
+contrast, and JPEG quality-52 captures. Their locked sorted per-file digests are respectively
+`fb43f82a14ff3507267adf7ed754136b0fdc55ec5a30222cfe62cf36095625ac` and
+`5caf2e34172ac3171c74426c874524968181644c5be404738f7dd26103fe8fac`. Representative atlases from
+all profiles and themes, both width extremes, and DPR 2 were visually inspected before evaluation.
+
+**Reproducibility.** MPS training now has independent data and initialization seeds. A one-step
+smoke produced byte-identical checkpoints for identical seed pairs and different hashes after only
+the initialization seed changed. The former implicit seeds remain the defaults. Eight predeclared
+20,000-step replications of the unchanged 41,918-parameter topology produced:
+
+| Run | Board accuracy | Failures / 4,096 | Triple accuracy | Attribute accuracy | Train seconds |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 0.874268 | 515 | 0.924530 | 0.977661 | 57.237 |
+| 2 | 0.845459 | 633 | 0.901337 | 0.970856 | 65.339 |
+| 3 | 0.845703 | 632 | 0.895599 | 0.971133 | 69.095 |
+| 4 | 0.871826 | 525 | 0.912659 | 0.977918 | 71.960 |
+| 5 | 0.881104 | 487 | 0.921326 | 0.979599 | 71.902 |
+| 6 | 0.856689 | 587 | 0.908173 | 0.975329 | 73.316 |
+| 7 | 0.853027 | 602 | 0.906555 | 0.977918 | 65.607 |
+| 8 | 0.879150 | 495 | 0.926544 | 0.978541 | 70.054 |
+
+The locked selection rule chose run 5 by fewest failures. Run 1 exactly reproduced the formerly
+promoted checkpoint hash, confirming that the lower robustness was caused by the harder evaluator,
+not an accidental recipe change. Failures were stable across seeds: crop caused 253–322 per run and
+shadow caused 179–279, while clean and blur caused at most two. This is a repeatable scale-shift
+limit, not a seed lottery.
+
+**Targeted architecture candidate.** The predeclared `specialist-spatial-plus-global` candidate
+concatenated eight channel means to each specialist's flattened 384-wide spatial feature. It added
+768 weights and no layer. MPSGraph and FrankenTorch agreed on the one-step probe loss (`5.351852`)
+and gradients before the full run. The candidate then regressed to 586 failures, board accuracy
+0.856934, triple accuracy 0.911224, and attribute accuracy 0.974116. It was rejected and removed.
+Global means do not preserve the missing scale-normalized spatial evidence.
+
+**Frozen abstention model.** Every board records relation score and runner-up margin plus normalized
+selected-attribute entropy and weakest attribute probability margin. A four-feature logistic model
+was fitted only on run 5's research records, and its threshold was fixed just above the largest
+incorrect research logit. It accepted 1,016/4,096 research boards (24.80%) with zero accepted errors.
+Repeated-frame choice agreement and pixel stability are separate mandatory gates.
+
+**One-time sealed result.** The sealed digest was reverified immediately before its only evaluator
+run. Raw results over 10,000 boards were 1,085 failures, board accuracy 0.891500, triple accuracy
+0.923113, and attribute accuracy 0.980396. The frozen guard accepted 2,462 boards (24.62%) with four
+errors: accepted accuracy 0.998375. All four accepted errors were in crop or shadow profiles. No
+coefficient or threshold was changed afterward; board-v5 sealed data is now exposed and retired.
+
+**Closed-loop browser result.** The extension takes two observations 90 ms apart, requires identical
+actions and stable pixels, clears highlights before clicking, and then requires two stable captures
+showing a material board change. An unchanged or unstable board stops autoplay. Across 12 responsive
+cases (four themes by three viewports), all 12 proposed triples were valid; four passed the frozen
+guard and completed click plus transition verification, while eight safely abstained. The embedded
+checkpoint SHA-256 is `9f062411a540d5067bda8e1d13cf48256b8cde5a336083cb11287e51dab7293e`.
+A 1,000-iteration benchmark measured 2.502 ms cached inference and 2.767 ms with pixel transfer.
+
+**Next research question.** The priority is explicit scale robustness, not another generic width or
+depth increase. Candidate inputs include scale-normalized card segmentation or a small multi-scale
+specialist path. Any follow-up needs a newly generated sealed corpus; these board-v5 sealed examples
+may diagnose the completed cycle but may not select or tune the next model.

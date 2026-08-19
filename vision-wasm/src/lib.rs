@@ -1,7 +1,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 // `no_mangle` is an unsafe attribute in Rust 2024 because symbol collisions can
-// be unsound. These eight names are the crate's deliberately tiny browser ABI;
+// be unsound. These names are the crate's deliberately tiny browser ABI;
 // there are no unsafe blocks or raw-memory interfaces behind them.
 
 use std::cell::RefCell;
@@ -22,6 +22,9 @@ struct Runtime {
     cards: Vec<f64>,
     card_count: usize,
     last_score: f32,
+    last_score_margin: f32,
+    last_attribute_entropy: f32,
+    last_attribute_margin: f32,
 }
 
 impl Runtime {
@@ -42,6 +45,9 @@ impl Runtime {
             cards: Vec::new(),
             card_count: 0,
             last_score: f32::NEG_INFINITY,
+            last_score_margin: f32::NEG_INFINITY,
+            last_attribute_entropy: f32::INFINITY,
+            last_attribute_margin: f32::NEG_INFINITY,
         })
     }
 
@@ -52,6 +58,9 @@ impl Runtime {
         self.cards = vec![0.0; card_count * CARD_PIXELS];
         self.card_count = card_count;
         self.last_score = f32::NEG_INFINITY;
+        self.last_score_margin = f32::NEG_INFINITY;
+        self.last_attribute_entropy = f32::INFINITY;
+        self.last_attribute_margin = f32::NEG_INFINITY;
         true
     }
 
@@ -65,19 +74,16 @@ impl Runtime {
             .map_err(|error| error.to_string())?;
         self.session.truncate_autograd_graph(self.graph_boundary);
 
-        let Some((best_index, best_score)) = output
-            .scores
-            .into_iter()
-            .enumerate()
-            .filter(|(_, score)| score.is_finite())
-            .max_by(|(_, left), (_, right)| left.total_cmp(right))
-        else {
+        let Some(decision) = output.best_decision() else {
             return Err("policy produced no finite score".to_string());
         };
-        let [first, second, third] = output.triples[best_index];
+        let [first, second, third] = decision.triple;
         #[allow(clippy::cast_possible_truncation)]
         {
-            self.last_score = best_score as f32;
+            self.last_score = decision.score as f32;
+            self.last_score_margin = decision.score_margin as f32;
+            self.last_attribute_entropy = decision.mean_attribute_entropy as f32;
+            self.last_attribute_margin = decision.min_attribute_margin as f32;
         }
         let first = u32::try_from(first).map_err(|error| error.to_string())?;
         let second = u32::try_from(second).map_err(|error| error.to_string())?;
@@ -155,6 +161,21 @@ pub extern "C" fn last_score() -> f32 {
     with_runtime(|runtime| runtime.last_score).unwrap_or(f32::NEG_INFINITY)
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn last_score_margin() -> f32 {
+    with_runtime(|runtime| runtime.last_score_margin).unwrap_or(f32::NEG_INFINITY)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn last_attribute_entropy() -> f32 {
+    with_runtime(|runtime| runtime.last_attribute_entropy).unwrap_or(f32::INFINITY)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn last_attribute_margin() -> f32 {
+    with_runtime(|runtime| runtime.last_attribute_margin).unwrap_or(f32::NEG_INFINITY)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CARD_PIXELS, Runtime};
@@ -170,6 +191,9 @@ mod tests {
         assert_eq!(runtime.cards.len(), 3 * CARD_PIXELS);
         assert_eq!(runtime.best_triple()?, 0x00_01_02);
         assert!(runtime.last_score.is_finite());
+        assert!(runtime.last_score_margin.is_infinite());
+        assert!(runtime.last_attribute_entropy.is_finite());
+        assert!(runtime.last_attribute_margin.is_finite());
         Ok(())
     }
 }

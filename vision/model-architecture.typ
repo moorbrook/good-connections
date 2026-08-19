@@ -281,13 +281,13 @@
       #v(4pt)
       #stage([TRAIN], [272 atlases #linebreak() seeds 0-16 #linebreak() widths 128, 160, 224, 280], color: teal)
       #v(4pt)
-      #stage([RESEARCH], [256 atlases #linebreak() seeds 9001-9008 #linebreak() 8 widths: 104-376], color: purple)
+      #stage([RESEARCH V5], [240 atlases #linebreak() seeds 11001-11002 #linebreak() 6 capture profiles + DPR 2], color: purple)
       #v(4pt)
-      #stage([SEALED FINAL], [64 atlases #linebreak() seeds 10001-10004 #linebreak() widths 112, 181, 299, 367], color: green)
+      #stage([SEALED V5], [240 atlases #linebreak() seeds 12001-12002 #linebreak() unseen widths and profile mix], color: green)
       #v(7pt)
       #text(size: 5.35pt, fill: muted)[All splits span four themes. Research and final seeds and widths are absent from training. The sealed holdout is evaluated once, then retired.]
       #v(7pt)
-      #stage([DIAGNOSTICS], [Failures group by theme, seed, width, action rank, and attribute. Specialist logits expose perception errors without becoming a hard gate.], color: rose, fill: rgb("#FFF6F8"))
+      #stage([DIAGNOSTICS + GUARD], [Relation score/margin and attribute entropy/margin feed a research-fitted abstention gate. Repeated frames and post-click pixel change are also required.], color: rose, fill: rgb("#FFF6F8"))
       #v(6pt)
       #text(size: 5.15pt, weight: 680, fill: red)[Finite envelope claim - not proof of universal 100% reliability.]
     ],
@@ -369,13 +369,13 @@
           rows: (43pt,), gutter: 0pt,
           stage([BROWSER], [capture + crop #linebreak() area resample], color: cyan), flow(),
           stage([WASM], [FrankenTorch #linebreak() embedded .ftsv], color: purple), flow(),
-          stage([ACTION], [packed u32 #linebreak() highlight / click], color: teal),
+          stage([GUARDED ACTION], [two stable reads #linebreak() click + verify change], color: teal),
         )
         #v(5pt)
         #tiny-row([Checkpoint], [330 KB .ftsv], color: purple)
         #tiny-row([Generated WASM], [2.5 MiB], color: purple)
-        #tiny-row([Cached inference], [2.416 ms / board], color: teal)
-        #tiny-row([With pixel transfer], [2.508 ms / board], color: teal)
+        #tiny-row([Cached inference], [2.502 ms / board], color: teal)
+        #tiny-row([With pixel transfer], [2.767 ms / board], color: teal)
       ],
       color: purple,
       fill: rgb("#FCFBFF"),
@@ -395,27 +395,27 @@
     [
       #grid(
         columns: (1fr, 1fr, 1fr, 1fr), rows: (47pt,), gutter: 4pt,
-        metric([0 / 4,096], [research board failures], color: purple),
-        metric([0 / 10,000], [sealed board failures], color: green),
-        metric([99.9975%], [sealed triple accuracy], color: blue),
-        metric([12 / 12], [browser action paths], color: teal),
+        metric([487 / 4,096], [v5 research raw failures], color: purple),
+        metric([1,085 / 10,000], [v5 sealed raw failures], color: orange),
+        metric([99.84% @ 24.62%], [sealed guarded accuracy / coverage], color: green),
+        metric([4 / 12], [guarded browser actions verified], color: teal),
       )
       #v(7pt)
       #grid(
         columns: (1.1fr, 1fr), gutter: 10pt,
         [
-          #text(size: 5.6pt, weight: 720, fill: ink)[20k-step training time - 24.6x faster]
+          #text(size: 5.6pt, weight: 720, fill: ink)[20k-step training time - about 20.9x faster]
           #v(4pt)
           #bar([CPU], 100%, [~1,500 s], muted)
           #v(3pt)
-          #bar([MPSGraph], 4.06%, [60.9 s], blue)
+          #bar([MPSGraph], 4.79%, [71.9 s], blue)
         ],
         [
           #text(size: 5.6pt, weight: 720, fill: ink)[Board inference latency]
           #v(4pt)
-          #bar([Cached], 96.3%, [2.416 ms], teal)
+          #bar([Cached], 90.4%, [2.502 ms], teal)
           #v(3pt)
-          #bar([Transfer + infer], 100%, [2.508 ms], green)
+          #bar([Transfer + infer], 100%, [2.767 ms], green)
         ],
       )
     ],
@@ -447,9 +447,9 @@
         [
           #text(size: 5.6pt, weight: 720, fill: ink)[Reproducibility controls]
           #v(3pt)
-          #tiny-row([Seed], [99005], color: purple)
+          #tiny-row([Selected seeds], [490009 / 0x369dea0f31a53f85], color: purple)
           #tiny-row([Batch], [64 balanced triples], color: purple)
-          #tiny-row([Run record], [no augment | append-only log], color: purple)
+          #tiny-row([Replications], [8 fixed seed pairs], color: purple)
         ],
       )
     ],

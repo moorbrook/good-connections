@@ -1,5 +1,9 @@
 import initFrankenTorch from './set_vision_runtime.js'
 import { areaResampleRgb } from './preprocess.js'
+import {
+  boardTransitionPass,
+  repeatedObservationPass,
+} from './guard.js'
 
 const status = document.querySelector('#status')
 const choice = document.querySelector('#choice')
@@ -8,12 +12,11 @@ const scanButton = document.querySelector('#scan')
 const playButton = document.querySelector('#play')
 const autoButton = document.querySelector('#auto')
 const selectorInput = document.querySelector('#selector')
-const thresholdInput = document.querySelector('#threshold')
 
 let wasm
 let modelShape
 let currentTab
-let currentChoice
+let currentObservation
 let autoPlaying = false
 
 async function loadModel() {
@@ -72,9 +75,9 @@ async function screenshotPixels(tab, rects, viewport) {
   })
 }
 
-async function scanBoard() {
+async function observeBoard(tab = undefined) {
   if (!wasm) throw new Error('Model is still loading')
-  currentTab = await activeTab()
+  currentTab = tab ?? await activeTab()
   await installReader(currentTab.id)
   const selector = selectorInput.value.trim() || '.card-btn'
   const geometry = await chrome.tabs.sendMessage(currentTab.id, {
@@ -91,38 +94,79 @@ async function scanBoard() {
   for (let index = 0; index < pixels.length; index++) wasm.set_pixel(index, pixels[index])
   const packed = wasm.best_triple()
   if (packed === 0xffffffff) throw new Error('Model could not score this board')
-  currentChoice = [(packed >>> 16) & 255, (packed >>> 8) & 255, packed & 255]
-  const probability = 1 / (1 + Math.exp(-wasm.last_score()))
-  choice.textContent = currentChoice.map((index) => index + 1).join(' · ')
-  confidence.textContent = `${(probability * 100).toFixed(1)}% learned-set confidence`
+  const observation = {
+    tab: currentTab,
+    selector,
+    cardCount: geometry.rects.length,
+    pixels,
+    choice: [(packed >>> 16) & 255, (packed >>> 8) & 255, packed & 255],
+    score: wasm.last_score(),
+    scoreMargin: wasm.last_score_margin(),
+    attributeEntropy: wasm.last_attribute_entropy(),
+    attributeMargin: wasm.last_attribute_margin(),
+  }
   const tripleCount = geometry.rects.length * (geometry.rects.length - 1) * (geometry.rects.length - 2) / 6
-  status.textContent = `Scored ${tripleCount} visual triples in ${(performance.now() - inferenceStarted).toFixed(1)} ms`
-  playButton.disabled = probability < Number(thresholdInput.value)
+  observation.summary = `Scored ${tripleCount} visual triples in ${(performance.now() - inferenceStarted).toFixed(1)} ms`
+  return observation
+}
+
+function renderObservation(observation, accepted) {
+  choice.textContent = observation.choice.map((index) => index + 1).join(' · ')
+  confidence.textContent = `score ${observation.score.toFixed(3)} · relation margin ${observation.scoreMargin.toFixed(3)} · attribute entropy ${observation.attributeEntropy.toFixed(3)} · weakest attribute margin ${observation.attributeMargin.toFixed(3)}`
+  status.textContent = accepted ? observation.summary : 'Abstained: repeated frames or decision diagnostics did not pass'
+  playButton.disabled = !accepted
+}
+
+async function scanBoard() {
+  const first = await observeBoard()
+  await new Promise((resolve) => setTimeout(resolve, 90))
+  const second = await observeBoard(first.tab)
+  const accepted = repeatedObservationPass(first, second)
+  currentObservation = accepted ? second : undefined
+  renderObservation(second, accepted)
   await chrome.tabs.sendMessage(currentTab.id, {
-    type: 'set-vision:highlight', selector, indices: currentChoice,
+    type: 'set-vision:highlight', selector: second.selector, indices: accepted ? second.choice : [],
   })
-  return probability
+  return accepted
 }
 
 async function playChoice() {
-  if (!currentTab?.id || !currentChoice) return
+  if (!currentTab?.id || !currentObservation) return false
+  const before = currentObservation
+  await chrome.tabs.sendMessage(currentTab.id, {
+    type: 'set-vision:highlight', selector: before.selector, indices: [],
+  })
   await chrome.tabs.sendMessage(currentTab.id, {
     type: 'set-vision:click',
-    selector: selectorInput.value.trim() || '.card-btn',
-    indices: currentChoice,
+    selector: before.selector,
+    indices: before.choice,
   })
+  currentObservation = undefined
+  playButton.disabled = true
+  status.textContent = 'Waiting for a stable board change…'
+  await new Promise((resolve) => setTimeout(resolve, 650))
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const firstAfter = await observeBoard(before.tab)
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    const secondAfter = await observeBoard(before.tab)
+    if (boardTransitionPass(before, firstAfter, secondAfter)) {
+      status.textContent = 'Board change verified from pixels'
+      return true
+    }
+    await new Promise((resolve) => setTimeout(resolve, 220))
+  }
+  throw new Error('Auto-play stopped: board did not change after the click action')
 }
 
 async function guardedAutoLoop() {
   while (autoPlaying) {
-    const probability = await scanBoard()
-    if (probability < Number(thresholdInput.value)) {
+    const accepted = await scanBoard()
+    if (!accepted) {
       autoPlaying = false
-      status.textContent = 'Auto-play stopped: confidence below threshold'
+      status.textContent = 'Auto-play stopped: abstention guard rejected the board'
       break
     }
     await playChoice()
-    await new Promise((resolve) => setTimeout(resolve, 850))
   }
   autoButton.textContent = 'Start guarded auto-play'
   autoButton.classList.remove('running')

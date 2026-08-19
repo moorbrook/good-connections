@@ -20,6 +20,8 @@ use set_vision_contract::{
 use set_vision_data::{AtlasCollection, Batch, Rng};
 
 const DEFAULT_STEPS: usize = 100;
+const DEFAULT_DATA_SEED: u64 = 99_005;
+const DEFAULT_INIT_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 const LEARNING_RATE: f32 = 8.0e-4;
 const WEIGHT_DECAY: f32 = 1.0e-4;
 
@@ -27,6 +29,8 @@ struct TrainConfig {
     steps: usize,
     output: Option<PathBuf>,
     augment: bool,
+    data_seed: u64,
+    init_seed: u64,
 }
 
 struct PreparedBatch {
@@ -272,6 +276,8 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
         steps: DEFAULT_STEPS,
         output: None,
         augment: true,
+        data_seed: DEFAULT_DATA_SEED,
+        init_seed: DEFAULT_INIT_SEED,
     };
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -288,9 +294,21 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
                 ));
             }
             "--no-augment" => config.augment = false,
+            "--data-seed" => {
+                config.data_seed = arguments
+                    .next()
+                    .ok_or("--data-seed requires a value")?
+                    .parse::<u64>()?;
+            }
+            "--init-seed" => {
+                config.init_seed = arguments
+                    .next()
+                    .ok_or("--init-seed requires a value")?
+                    .parse::<u64>()?;
+            }
             unknown => {
                 return Err(format!(
-                    "unknown argument {unknown}; usage: [--steps N] [--output PATH] [--no-augment]"
+                    "unknown argument {unknown}; usage: [--steps N] [--output PATH] [--no-augment] [--data-seed N] [--init-seed N]"
                 )
                 .into());
             }
@@ -421,7 +439,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("loss: {loss_value:.6}");
     println!("gradient: {gradient_values:?}");
 
-    let mut policy = policy_graph::PolicyGraph::new();
+    println!("data_seed: {}", config.data_seed);
+    println!("init_seed: {}", config.init_seed);
+    let mut policy = policy_graph::PolicyGraph::new(config.init_seed);
     let parameter_count = policy
         .parameters
         .iter()
@@ -433,7 +453,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .parent()
         .ok_or("MPSGraph crate has no repository parent")?;
     let atlases = AtlasCollection::load(&repository.join("vision-artifacts/atlases"))?;
-    let mut rng = Rng::new(99005);
+    let mut rng = Rng::new(config.data_seed);
     let probe = prepare_batch(&atlases.make_batch(&mut rng, policy_graph::BATCH_SIZE, false));
     let compile_started = Instant::now();
     let (initial_probe_loss, _) = autoreleasepool(|_| run_policy(&policy, &device, &probe))?;

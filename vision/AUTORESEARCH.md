@@ -134,3 +134,114 @@ For a promoted checkpoint, record:
 
 Finite testing supports a statement such as “0 failures in 10,000 boards from this sealed renderer
 distribution.” It never proves universal 100% reliability.
+
+## Board-v5 robustness cycle (locked before results)
+
+Board-v4's sealed holdout is exposed and cannot be reused. Board-v5 tests capture-path robustness
+without changing the 41,918-parameter specialist topology. Training remains 20,000 MPSGraph
+steps, batch size 64, no augmentation, and the existing `vision-artifacts/atlases` corpus.
+
+### Independent training replications
+
+Run these eight predeclared `(data seed, initialization seed)` pairs. The first pair reproduces the
+former hard-coded recipe; the other seven measure seed sensitivity rather than seed lottery.
+
+| Run | Data seed | Initialization seed |
+|---:|---:|---:|
+| 1 | 99005 | 11400714819323198485 |
+| 2 | 190001 | 6364136223846793005 |
+| 3 | 290003 | 1442695040888963407 |
+| 4 | 390007 | 3202034522624059733 |
+| 5 | 490009 | 3935559000370003845 |
+| 6 | 590011 | 2862933555777941757 |
+| 7 | 690019 | 7046029254386353131 |
+| 8 | 790021 | 9650029242287828579 |
+
+Every checkpoint is evaluated on the same board-v5 research corpus with 4,096 boards and 512
+balanced triple batches. Rank recipes by fewest board failures, then highest triple accuracy, then
+lowest run number. Only the selected checkpoint may receive one board-v5 sealed evaluation.
+
+### Fresh capture-shift corpora
+
+The research directory is `vision-artifacts/board-v5-research-atlases` (240 PNGs):
+
+- seeds 11001–11002, all four themes, CSS widths 96, 137, 229, and 353, profiles `clean`, `blur`,
+  `crop`, `shadow`, `lowcontrast`, and JPEG quality 52, DPR 1 (192 PNGs); and
+- the same seeds/themes, widths 113 and 287, profiles `clean`, `crop`, and `jpeg`, true Chrome DPR
+  2 screenshots (48 PNGs).
+
+The sealed directory is `vision-artifacts/board-v5-sealed-atlases` (240 PNGs), rendered and hashed
+before any training result but never passed to an evaluator until selection:
+
+- seeds 12001–12002, all themes, CSS widths 104, 173, 257, and 371, all six profiles, DPR 1
+  (192 PNGs); and
+- the same seeds/themes, widths 121 and 299, profiles `blur`, `shadow`, and `jpeg`, DPR 2
+  (48 PNGs).
+
+The locked sorted per-file aggregate SHA-256 digests are:
+
+- research: `fb43f82a14ff3507267adf7ed754136b0fdc55ec5a30222cfe62cf36095625ac`;
+- sealed: `5caf2e34172ac3171c74426c874524968181644c5be404738f7dd26103fe8fac`.
+
+The loader derives physical padding and gaps from the explicit `-dpr2` filename token. Visual QA
+must cover every profile, theme, width extreme, and DPR before hashes are recorded. File count,
+sorted per-file SHA-256 aggregate, and image dimensions are immutable after that point.
+
+### Abstention and closed-loop gate
+
+Each research board records relation score, top-one/top-two relation margin, normalized mean
+attribute entropy, weakest selected-attribute probability margin, and correctness. Any fitted guard
+uses only the selected checkpoint's board-v5 research samples. It must report accepted coverage and
+accepted errors; the sealed data cannot choose coefficients or thresholds.
+
+The browser also requires two captures whose selected triples agree and whose card pixels are
+stable. After clicking, it clears its highlight and requires two stable captures showing a
+material pixel-level board change. An unchanged/stale frame, unstable animation, disagreement, or
+guard rejection stops autoplay.
+
+### Architecture decision
+
+Do not change width, depth, resolution, or branches merely because another candidate might score
+better. First cluster board-v5 counterexamples by profile, theme, raster, DPR, and failed attribute.
+Change architecture only if those counterexamples identify a repeatable representational limit.
+If the unchanged topology satisfies the locked action and abstention gates, retaining it is the
+required outcome for this cycle.
+
+### Declared follow-up after eight replications (before candidate result)
+
+All eight unchanged-topology runs failed systematically under scale shifts. The locked control is
+replicate 5 (data seed 490009, initialization seed 3935559000370003845) with 487 failures in 4,096
+research boards. Across runs, crop/zoom-in caused 253–322 failures and shadow/scale-down caused
+179–279; clean and blur caused at most two each. This repeatable bidirectional scale sensitivity is
+evidence against the exact flattened specialist representation, not a single unlucky seed.
+
+Test one targeted candidate named `specialist-spatial-plus-global`: for every attribute specialist,
+retain the existing flattened 8×6×8 feature map and concatenate its eight channel-wise global
+means before the 24-wide projection. Everything else—training corpus, selected control seeds,
+20,000 steps, batch size, optimizer, relation scorer, input resolution, and evaluator—remains
+fixed. This adds 192 projection weights per head (768 total) and no new learned layer.
+
+Keep the candidate only if it has fewer than 487 research board failures, or ties at 487 with
+higher triple accuracy than 0.921326. Otherwise reject it and retain replicate 5. The winner then
+receives research-only abstention calibration and the cycle's one sealed evaluation. The sealed
+corpus remains evaluator-unopened while this rule is recorded.
+
+### Board-v5 result (sealed corpus now exposed)
+
+The `specialist-spatial-plus-global` candidate passed backend parity but was rejected by the locked
+research rule: it produced 586 failures, board accuracy 0.856934, triple accuracy 0.911224, and
+attribute accuracy 0.974116. The unchanged 41,918-parameter topology and replicate 5 checkpoint
+therefore remained selected.
+
+The guard was fitted only to replicate 5's 4,096 research records. Its frozen linear logit uses
+`[score, score_margin, -attribute_entropy, attribute_margin]`; the threshold is one numerical epsilon
+above the largest incorrect research logit. It accepted 1,016 research boards (24.80%) with zero
+accepted errors. This is a finite empirical cutoff, not a calibrated probability.
+
+The sealed digest was reverified as
+`5caf2e34172ac3171c74426c874524968181644c5be404738f7dd26103fe8fac` immediately before its single
+evaluation. On 10,000 sealed boards, the selected checkpoint achieved board accuracy 0.891500,
+triple accuracy 0.923113, and attribute accuracy 0.980396: 1,085 raw failures. The frozen guard
+accepted 2,462 boards (24.62%) with 4 accepted failures, for 0.998375 accepted accuracy. Those four
+failures occurred under crop or shadow profiles. The board-v5 sealed corpus is now exposed and must
+not tune coefficients, thresholds, architecture, or future candidate selection.

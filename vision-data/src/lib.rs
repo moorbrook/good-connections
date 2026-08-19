@@ -172,6 +172,13 @@ fn atlas_sampling_keys(name: &str) -> (&str, &str) {
     (theme, raster)
 }
 
+fn atlas_device_scale(name: &str) -> usize {
+    name.split('-')
+        .find_map(|part| part.strip_prefix("dpr")?.parse::<usize>().ok())
+        .filter(|&scale| scale > 0)
+        .unwrap_or(1)
+}
+
 fn board_has_set(ids: &[usize]) -> bool {
     for first in 0..ids.len() - 2 {
         for second in first + 1..ids.len() - 1 {
@@ -200,8 +207,14 @@ fn load_atlas(path: &Path) -> Result<Vec<Vec<f64>>, Box<dyn std::error::Error>> 
     };
     let width = usize::try_from(info.width)?;
     let height = usize::try_from(info.height)?;
-    let fixed_width = ATLAS_PADDING * 2 + (ATLAS_COLUMNS - 1) * ATLAS_GAP;
-    let fixed_height = ATLAS_PADDING * 2 + (ATLAS_ROWS - 1) * ATLAS_GAP;
+    let name = path
+        .file_stem()
+        .map_or_else(|| "unknown".into(), |name| name.to_string_lossy());
+    let device_scale = atlas_device_scale(&name);
+    let padding = ATLAS_PADDING * device_scale;
+    let gap = ATLAS_GAP * device_scale;
+    let fixed_width = padding * 2 + (ATLAS_COLUMNS - 1) * gap;
+    let fixed_height = padding * 2 + (ATLAS_ROWS - 1) * gap;
     let content_width = width.checked_sub(fixed_width);
     let content_height = height.checked_sub(fixed_height);
     let Some((source_card_width, source_card_height)) = content_width
@@ -224,8 +237,8 @@ fn load_atlas(path: &Path) -> Result<Vec<Vec<f64>>, Box<dyn std::error::Error>> 
     for id in 0..DECK_SIZE {
         let column = id % ATLAS_COLUMNS;
         let row = id / ATLAS_COLUMNS;
-        let source_x = ATLAS_PADDING + column * (source_card_width + ATLAS_GAP);
-        let source_y = ATLAS_PADDING + row * (source_card_height + ATLAS_GAP);
+        let source_x = padding + column * (source_card_width + gap);
+        let source_y = padding + row * (source_card_height + gap);
         cards.push(area_resample_rgb(
             bytes,
             width,
@@ -385,8 +398,8 @@ impl Rng {
 #[cfg(test)]
 mod tests {
     use super::{
-        CARD_HEIGHT, CARD_WIDTH, Rng, area_resample_rgb, atlas_sampling_keys, board_has_set,
-        completing_card, decode_card, hard_negative_triple,
+        CARD_HEIGHT, CARD_WIDTH, Rng, area_resample_rgb, atlas_device_scale, atlas_sampling_keys,
+        board_has_set, completing_card, decode_card, hard_negative_triple,
     };
 
     #[test]
@@ -394,6 +407,12 @@ mod tests {
         assert_eq!(atlas_sampling_keys("classic-0007-w128"), ("classic", "128"));
         assert_eq!(atlas_sampling_keys("signal-0192"), ("signal", "reference"));
         assert_eq!(atlas_sampling_keys("nocturne"), ("nocturne", "reference"));
+    }
+
+    #[test]
+    fn atlas_device_scale_reads_capture_suffix() {
+        assert_eq!(atlas_device_scale("classic-11001-pblur-dpr2-w144"), 2);
+        assert_eq!(atlas_device_scale("classic-11001-pblur-w144"), 1);
     }
 
     #[test]

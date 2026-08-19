@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, type CSSProperties } from 'react'
 import { fullDeck } from '../game/cards'
 import { Card } from '../ui/Card'
 import { CardThemeProvider } from '../ui/CardThemeContext'
@@ -18,6 +18,8 @@ const REFERENCE_CARD_HEIGHT = 140
 const COLUMNS = 9
 const GAP = 4
 const PADDING = 10
+
+type CaptureProfile = 'clean' | 'blur' | 'crop' | 'shadow' | 'lowcontrast' | 'jpeg'
 
 export const VISION_ATLAS_GEOMETRY = {
   cardWidth: REFERENCE_CARD_WIDTH,
@@ -42,11 +44,50 @@ function requestedCardWidth(): number {
   return Number.isSafeInteger(raw) && raw >= 96 && raw <= 380 ? raw : REFERENCE_CARD_WIDTH
 }
 
+function requestedCaptureProfile(): CaptureProfile {
+  const value = new URLSearchParams(window.location.search).get('vision-capture')
+  return value === 'blur' || value === 'crop' || value === 'shadow'
+    || value === 'lowcontrast' || value === 'jpeg'
+    ? value
+    : 'clean'
+}
+
+function captureStyles(profile: CaptureProfile): {
+  outer: CSSProperties
+  inner: CSSProperties
+} {
+  switch (profile) {
+    case 'blur':
+      return { outer: { overflow: 'hidden' }, inner: { filter: 'blur(0.55px) contrast(0.92)' } }
+    case 'crop':
+      return {
+        outer: { overflow: 'hidden' },
+        inner: { transform: 'translate(3px, -2px) scale(1.055)', transformOrigin: 'center' },
+      }
+    case 'shadow':
+      return {
+        outer: { overflow: 'hidden', background: '#c7c8cf' },
+        inner: {
+          boxShadow: '4px 5px 9px rgb(0 0 0 / 48%)',
+          transform: 'translate(-2px, -2px) scale(0.94)',
+          transformOrigin: 'center',
+        },
+      }
+    case 'lowcontrast':
+      return { outer: { overflow: 'hidden' }, inner: { filter: 'contrast(0.72) brightness(0.94) saturate(0.78)' } }
+    case 'jpeg':
+    case 'clean':
+      return { outer: {}, inner: {} }
+  }
+}
+
 export function VisionAtlas() {
   const theme = requestedTheme()
   const seed = requestedSeed()
   const cardWidth = requestedCardWidth()
   const cardHeight = Math.round(cardWidth * REFERENCE_CARD_HEIGHT / REFERENCE_CARD_WIDTH)
+  const captureProfile = requestedCaptureProfile()
+  const styles = captureStyles(captureProfile)
 
   useEffect(() => {
     document.body.classList.add('vision-atlas-page')
@@ -62,6 +103,7 @@ export function VisionAtlas() {
       <main
         aria-label={`${theme} vision training atlas`}
         data-vision-atlas={theme}
+        data-vision-capture={captureProfile}
         style={{
           display: 'grid',
           gridTemplateColumns: `repeat(${COLUMNS}, ${cardWidth}px)`,
@@ -75,9 +117,11 @@ export function VisionAtlas() {
           <div
             data-card-id={id}
             key={id}
-            style={{ width: cardWidth, height: cardHeight }}
+            style={{ width: cardWidth, height: cardHeight, ...styles.outer }}
           >
-            <Card card={card} theme={theme} visualVariation={variationFor(seed, id)} />
+            <div style={{ width: '100%', height: '100%', ...styles.inner }}>
+              <Card card={card} theme={theme} visualVariation={variationFor(seed, id)} />
+            </div>
           </div>
         ))}
       </main>

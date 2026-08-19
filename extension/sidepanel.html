@@ -16,11 +16,6 @@
         Card selector
         <input id="selector" value=".card-btn" spellcheck="false" />
       </label>
-      <label>
-        Auto-play threshold
-        <input id="threshold" type="number" min="0.5" max="0.999" step="0.01" value="0.92" />
-      </label>
-
       <div class="actions">
         <button id="scan">Scan board</button>
         <button id="play" class="primary" disabled>Play best</button>
@@ -32,7 +27,7 @@
         <strong id="choice">—</strong>
         <small id="confidence"></small>
       </section>
-      <p class="fineprint">Auto-play stops whenever model confidence falls below the threshold.</p>
+      <p class="fineprint">Actions require two stable agreeing frames, calibrated decision diagnostics, and a verified pixel-level board change.</p>
     </main>
     <script src="sidepanel.js" type="module"></script>
   </body>

@@ -25,6 +25,85 @@ pub struct BoardScores {
     pub attribute_logits: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoardDecision {
+    pub triple: [usize; 3],
+    pub score: f64,
+    pub runner_up_score: f64,
+    pub score_margin: f64,
+    pub mean_attribute_entropy: f64,
+    pub min_attribute_margin: f64,
+}
+
+impl BoardScores {
+    /// Returns the best action and diagnostics used by the abstention layer.
+    /// Entropy is normalized to `[0, 1]`; attribute margin is the weakest
+    /// top-one minus top-two softmax gap among the selected cards.
+    pub fn best_decision(&self) -> Option<BoardDecision> {
+        let mut ranked = self
+            .scores
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, score)| score.is_finite())
+            .collect::<Vec<_>>();
+        ranked.sort_by(|left, right| right.1.total_cmp(&left.1));
+        let &(best_index, score) = ranked.first()?;
+        let runner_up_score = ranked.get(1).map_or(f64::NEG_INFINITY, |(_, score)| *score);
+        let triple = *self.triples.get(best_index)?;
+        let mut entropy_total = 0.0;
+        let mut min_attribute_margin = 1.0_f64;
+        let mut attribute_count = 0_u32;
+        for card in triple {
+            let card_start = card.checked_mul(ATTRIBUTE_LOGITS)?;
+            let card_end = card_start.checked_add(ATTRIBUTE_LOGITS)?;
+            let logits = self.attribute_logits.get(card_start..card_end)?;
+            let (attributes, remainder) = logits.as_chunks::<ATTRIBUTE_VALUE_COUNT>();
+            if !remainder.is_empty() {
+                return None;
+            }
+            for attribute in attributes {
+                let probabilities = softmax_three(attribute);
+                let entropy = -probabilities
+                    .iter()
+                    .filter(|&&probability| probability > 0.0)
+                    .map(|&probability| probability * probability.ln())
+                    .sum::<f64>()
+                    / 3.0_f64.ln();
+                let mut ranked_probabilities = probabilities;
+                ranked_probabilities.sort_by(|left, right| right.total_cmp(left));
+                min_attribute_margin =
+                    min_attribute_margin.min(ranked_probabilities[0] - ranked_probabilities[1]);
+                entropy_total += entropy;
+                attribute_count += 1;
+            }
+        }
+        if attribute_count == 0 {
+            return None;
+        }
+        Some(BoardDecision {
+            triple,
+            score,
+            runner_up_score,
+            score_margin: score - runner_up_score,
+            mean_attribute_entropy: entropy_total / f64::from(attribute_count),
+            min_attribute_margin,
+        })
+    }
+}
+
+fn softmax_three(logits: &[f64; ATTRIBUTE_VALUE_COUNT]) -> [f64; ATTRIBUTE_VALUE_COUNT] {
+    let maximum = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let mut probabilities = logits.map(|logit| (logit - maximum).exp());
+    let total = probabilities.iter().sum::<f64>();
+    if total.is_finite() && total > 0.0 {
+        for probability in &mut probabilities {
+            *probability /= total;
+        }
+    }
+    probabilities
+}
+
 #[derive(Debug)]
 pub enum PolicyError {
     InvalidCardCount(usize),
@@ -349,7 +428,21 @@ mod tests {
     use ft_api::FrankenTorchSession;
     use ft_core::ExecutionMode;
 
-    use super::{CARD_PIXELS, PolicyError, VisualSetPolicy};
+    use super::{BoardScores, CARD_PIXELS, PolicyError, VisualSetPolicy};
+
+    #[test]
+    fn decision_diagnostics_rank_scores_and_measure_attribute_certainty() {
+        let scores = BoardScores {
+            triples: vec![[0, 1, 2], [0, 1, 3]],
+            scores: vec![2.5, 1.75],
+            attribute_logits: (0..4).flat_map(|_| [8.0, -4.0, -4.0].repeat(4)).collect(),
+        };
+        let decision = scores.best_decision().unwrap_or_else(|| unreachable!());
+        assert_eq!(decision.triple, [0, 1, 2]);
+        assert!((decision.score_margin - 0.75).abs() < 1.0e-12);
+        assert!(decision.mean_attribute_entropy < 0.001);
+        assert!(decision.min_attribute_margin > 0.999);
+    }
 
     #[test]
     fn board_scoring_rejects_invalid_input_at_its_boundary()

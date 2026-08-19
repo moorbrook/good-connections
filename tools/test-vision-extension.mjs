@@ -236,6 +236,7 @@ try {
 
   let modelFailures = 0
   let actionFailures = 0
+  let acceptedActions = 0
   for (const [index, testCase] of cases.entries()) {
     const [width, height] = testCase.viewport
     await game.send('Emulation.setDeviceMetricsOverride', {
@@ -261,13 +262,38 @@ try {
       captureBeyondViewport: false,
       fromSurface: true,
     })
+    await game.send('Page.navigate', {
+      url: `http://127.0.0.1:${previewPort}/?vision-board=${testCase.theme}&board-seed=${1100 + index}&vision-seed=${19000 + index}`,
+    })
+    await waitFor(
+      () => game.evaluate("document.documentElement.dataset.visionBoardReady === 'true'"),
+      'alternate responsive board',
+    )
+    const changedScreenshot = await game.send('Page.captureScreenshot', {
+      format: 'png',
+      captureBeyondViewport: false,
+      fromSurface: true,
+    })
+    await game.send('Page.navigate', {
+      url: `http://127.0.0.1:${previewPort}/?vision-board=${testCase.theme}&board-seed=${100 + index}&vision-seed=${9000 + index}`,
+    })
+    await waitFor(
+      () => game.evaluate("document.documentElement.dataset.visionBoardReady === 'true'"),
+      'restored responsive board',
+    )
     const gameTab = await panel.evaluate(
       `chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url?.startsWith(${JSON.stringify(`http://127.0.0.1:${previewPort}/`)})))`,
     )
     if (!gameTab?.id) throw new Error('Could not resolve the responsive-board tab')
     await panel.evaluate(
-      `globalThis.__setVisionHeadlessIo = {
-        captureVisibleTab: async () => ${JSON.stringify(`data:image/png;base64,${screenshot.data}`)},
+      `globalThis.__setVisionCaptureCount = 0
+      globalThis.__setVisionHeadlessIo = {
+        captureVisibleTab: async function () {
+          const value = globalThis.__setVisionCaptureCount++ < 3
+            ? ${JSON.stringify(`data:image/png;base64,${screenshot.data}`)}
+            : ${JSON.stringify(`data:image/png;base64,${changedScreenshot.data}`)}
+          return value
+        },
         activeTab: async () => (${JSON.stringify(gameTab)}),
       }`,
     )
@@ -288,7 +314,7 @@ try {
     await panel.evaluate("document.querySelector('#status').textContent = 'test pending'; document.querySelector('#scan').click()")
     const status = await waitFor(async () => {
       const value = await panel.evaluate("document.querySelector('#status').textContent")
-      if (value.startsWith('Scored')) return value
+      if (value.startsWith('Scored') || value.startsWith('Abstained:')) return value
       if (
         value !== 'test pending'
         && !value.startsWith('Capturing ')
@@ -306,6 +332,7 @@ try {
     const valid = isSet(ids)
     modelFailures += Number(!valid)
     const playEnabled = await panel.evaluate("!document.querySelector('#play').disabled")
+    acceptedActions += Number(playEnabled)
     if (playEnabled) await panel.evaluate("document.querySelector('#play').click(); true")
     const clicked = playEnabled ? await waitFor(async () => {
       const selected = await game.evaluate(`Array.from(document.querySelectorAll('.card-btn'))
@@ -313,18 +340,25 @@ try {
         .filter((index) => index >= 0)`)
       return selected.length === 3 ? selected : undefined
     }, `${testCase.theme} ${width}x${height} click action`) : []
-    const actionValid = playEnabled && JSON.stringify(clicked) === JSON.stringify(positions)
-    actionFailures += Number(!actionValid)
-    console.log(`${valid && actionValid ? 'PASS' : 'FAIL'} ${testCase.theme.padEnd(9)} viewport=${width}x${height} card=${cardRect.width.toFixed(1)}x${cardRect.height.toFixed(1)} ids=${ids.join(',')} ${status}`)
+    const actionValid = !playEnabled || JSON.stringify(clicked) === JSON.stringify(positions)
+    const transitionVerified = playEnabled ? await waitFor(async () => {
+      const value = await panel.evaluate("document.querySelector('#status').textContent")
+      if (value === 'Board change verified from pixels') return true
+      if (value.startsWith('Auto-play stopped:') || value.includes('did not change')) throw new Error(value)
+      return undefined
+    }, `${testCase.theme} ${width}x${height} board transition`, 20_000) : false
+    actionFailures += Number(playEnabled && (!actionValid || !transitionVerified))
+    const casePassed = valid && actionValid && (!playEnabled || transitionVerified)
+    console.log(`${casePassed ? 'PASS' : 'FAIL'} ${testCase.theme.padEnd(9)} viewport=${width}x${height} card=${cardRect.width.toFixed(1)}x${cardRect.height.toFixed(1)} ids=${ids.join(',')} ${status}`)
   }
   game.close()
   panel.close()
-  if (modelFailures > 0 || actionFailures > 0) {
+  if (modelFailures > 0 || actionFailures > 0 || acceptedActions === 0) {
     throw new Error(
-      `${modelFailures}/${cases.length} invalid selections; ${actionFailures}/${cases.length} action mismatches`,
+      `${modelFailures}/${cases.length} invalid selections; ${actionFailures}/${acceptedActions} accepted action mismatches; ${acceptedActions}/${cases.length} actions accepted`,
     )
   }
-  console.log(`extension screenshot-to-click path: ${cases.length}/${cases.length} valid`)
+  console.log(`extension screenshot path: ${cases.length}/${cases.length} valid proposals; ${acceptedActions}/${cases.length} guarded actions clicked and transition-verified`)
 } finally {
   for (const process of processes.reverse()) process.kill('SIGTERM')
   if (temporaryRoot) await rm(temporaryRoot, { recursive: true, force: true })

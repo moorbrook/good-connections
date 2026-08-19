@@ -76,10 +76,11 @@ also renders several source raster widths before every card is reduced to 30×21
 theme and source-width buckets uniformly, preventing a large fixed-width corpus from silently
 dominating the responsive examples.
 
-Research validation uses themes, renderer seeds, and source widths outside the training corpus. A
-candidate must reach zero wrong selections on the fixed 4,096-board evaluator, then pass a separately
-generated final holdout exactly once. A finite zero-failure result describes the tested envelope; it
-is not proof of universal 100% reliability.
+Board-v5 research validation uses unseen renderer seeds, widths, DPR 1/2 captures, and six capture
+profiles: clean, blur, crop/zoom-in, shadow/scale-down, low contrast, and JPEG recompression. Its
+separate sealed corpus was rendered and hashed before training and evaluated exactly once after the
+recipe and guard were frozen. The current raw model is not universally reliable under scale shifts;
+the extension therefore abstains conservatively instead of presenting a raw argmax as safe.
 
 Generate atlases and run one model-search experiment with:
 
@@ -132,11 +133,15 @@ tools/build-vision-extension.sh
 node tools/benchmark-vision-wasm.mjs 100
 ```
 
-The promoted checkpoint produced 0 failures on 4,096 board-v4 research boards and then 0 failures
-in its one permitted 10,000-board sealed evaluation. In the rebuilt extension, all 12 responsive
-screenshot-to-click cases passed. A 1,000-iteration Node/WASM benchmark measured 2.416 ms cached
-inference and 2.508 ms including pixel transfer per 12-card board. These are finite measurements of
-the tested renderer and machine, not a universal correctness or latency guarantee.
+Eight independent board-v5 training replications exposed substantial seed sensitivity. The selected
+unchanged-topology replicate had 487 failures on 4,096 research boards (88.11% raw board accuracy).
+Its one permitted 10,000-board sealed evaluation had 1,085 failures (89.15%). A research-only linear
+guard over relation score, score margin, attribute entropy, and weakest attribute margin accepted
+24.62% of sealed boards with 99.84% accepted accuracy (4 accepted errors). It was not retuned after
+the sealed result. In the rebuilt extension, all 12 responsive browser proposals were valid; 4 passed
+the guard and completed click plus pixel-change verification, while 8 safely abstained. A
+1,000-iteration Node/WASM benchmark measured 2.502 ms cached inference and 2.767 ms including pixel
+transfer per 12-card board.
 
 ## Load and use the extension
 
@@ -144,13 +149,15 @@ the tested renderer and machine, not a universal correctness or latency guarante
 2. Select this repository's `extension/` directory.
 3. Open a game board and click the extension icon to show the side panel.
 4. Keep `.card-btn` for this app, or enter the live board's selector for clickable cards.
-5. Use **Scan board** first. **Play best** remains disabled below the configured confidence.
+5. Use **Scan board** first. **Play best** remains disabled when diagnostics or repeated-frame
+   agreement fail.
 
-Guarded auto-play stops when confidence falls below the threshold. The extension requests
+Guarded auto-play requires the frozen diagnostic model, two stable captures with the same action,
+and a stable material board change after clicking. The extension requests
 `activeTab`, not blanket host access; the broader host permission in the headless integration test
 exists only in a temporary copied manifest because CDP clicks cannot grant `activeTab`.
-Confidence is a model logit, not a correctness guarantee: a perception error can still be confident,
-which is why promotion depends on board-level holdouts rather than the threshold alone.
+The displayed values are raw diagnostics, not a correctness probability: a perception error can
+still score confidently, as the four accepted sealed errors demonstrate.
 
 ## Verification
 

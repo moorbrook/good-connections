@@ -24,8 +24,29 @@ export function ResponsiveVisionBoard() {
   const theme = requestedTheme()
   const boardSeed = integerParameter('board-seed', 1)
   const visualSeed = integerParameter('vision-seed', 0)
-  const board = useMemo(() => generateModeB(mulberry32(boardSeed)), [boardSeed])
+  const [round, setRound] = useState(0)
+  const board = useMemo(() => generateModeB(mulberry32(boardSeed + round)), [boardSeed, round])
   const [selected, setSelected] = useState<number[]>([])
+
+  const selectCard = (index: number) => {
+    setSelected((current) => {
+      if (current.includes(index)) return current
+      const next = [...current, index]
+      if (next.length === 3) {
+        const sorted = [...next].sort((left, right) => left - right)
+        const valid = board.sets.some((triple) => triple.every((value, position) => value === sorted[position]))
+        if (valid) {
+          window.setTimeout(() => {
+            setRound((value) => value + 1)
+            setSelected([])
+          }, 420)
+        } else {
+          window.setTimeout(() => setSelected([]), 420)
+        }
+      }
+      return next
+    })
+  }
 
   useEffect(() => {
     document.documentElement.dataset.visionBoardReady = 'true'
@@ -45,7 +66,7 @@ export function ResponsiveVisionBoard() {
               data-card-id={cardId(card)}
               key={cardId(card)}
               aria-pressed={selected.includes(index)}
-              onClick={() => setSelected((current) => [...current, index])}
+              onClick={() => selectCard(index)}
             >
               <Card
                 card={card}

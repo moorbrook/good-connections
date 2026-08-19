@@ -8,7 +8,8 @@ use ft_core::ExecutionMode;
 use ft_nn::{BCEWithLogitsLoss, CrossEntropyLoss, LossModule, Module};
 use ft_optim::{AdamW, Optimizer};
 use set_vision_data::{AtlasCollection, Rng, decode_card};
-use set_vision_policy::{CARD_PIXELS, VisualSetPolicy};
+use set_vision_policy::{BoardDecision, CARD_PIXELS, VisualSetPolicy};
+use std::io::Write;
 
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -132,6 +133,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("evaluation_seconds: {:.6}", evaluation.seconds);
     println!("evaluation_protocol: board-multiraster");
+    let abstention_path = config.output_dir.join("abstention-samples.tsv");
+    write_abstention_samples(&abstention_path, &evaluation.abstention_samples)?;
+    println!("abstention_samples: {}", abstention_path.display());
     if !config.eval_only {
         let state = model.state_dict(&session)?;
         let checkpoint = config.output_dir.join("set-vision.ftsv");
@@ -150,6 +154,14 @@ struct Evaluation {
     board_failures: usize,
     seconds: f64,
     atlases: Vec<AtlasEvaluation>,
+    abstention_samples: Vec<AbstentionSample>,
+}
+
+#[derive(Debug)]
+struct AbstentionSample {
+    atlas: String,
+    correct: bool,
+    decision: BoardDecision,
 }
 
 #[derive(Debug)]
@@ -179,6 +191,7 @@ fn evaluate(
     let mut atlas_attribute_total = vec![0_usize; atlases.len()];
     let mut atlas_board_correct = vec![0_usize; atlases.len()];
     let mut atlas_board_total = vec![0_usize; atlases.len()];
+    let mut abstention_samples = Vec::with_capacity(boards);
     let mut triple_rng = Rng::new(0xa11c_e5ed_5eed);
     let mut board_rng = Rng::new(0xb0a4_d5e7_5eed);
     session.no_grad_enter();
@@ -220,13 +233,20 @@ fn evaluate(
     for _ in 0..boards {
         let board = atlases.make_board(&mut board_rng, BOARD_CARDS);
         let output = model.score_board(session, board.pixels, BOARD_CARDS)?;
+        let decision = output
+            .best_decision()
+            .ok_or("policy produced no finite board decision")?;
         let best = output
-            .scores
+            .triples
             .iter()
-            .enumerate()
-            .max_by(|left, right| left.1.total_cmp(right.1))
-            .map_or(usize::MAX, |(index, _)| index);
+            .position(|triple| *triple == decision.triple)
+            .ok_or("policy decision was absent from its triple list")?;
         let correct = board.set_targets.get(best).copied() == Some(1.0);
+        abstention_samples.push(AbstentionSample {
+            atlas: atlases.name(board.atlas_index).to_string(),
+            correct,
+            decision,
+        });
         if !correct {
             let best_valid = output
                 .scores
@@ -287,6 +307,7 @@ fn evaluate(
         board_accuracy: ratio(boards - board_failures, boards)?,
         board_failures,
         seconds: started.elapsed().as_secs_f64(),
+        abstention_samples,
         atlases: (0..atlases.len())
             .map(|index| {
                 Ok(AtlasEvaluation {
@@ -301,6 +322,32 @@ fn evaluate(
             })
             .collect::<Result<Vec<_>, std::num::TryFromIntError>>()?,
     })
+}
+
+fn write_abstention_samples(
+    path: &std::path::Path,
+    samples: &[AbstentionSample],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let file = std::fs::File::create(path)?;
+    let mut writer = std::io::BufWriter::new(file);
+    writeln!(
+        writer,
+        "atlas\tcorrect\tscore\tscore_margin\tmean_attribute_entropy\tmin_attribute_margin"
+    )?;
+    for sample in samples {
+        writeln!(
+            writer,
+            "{}\t{}\t{:.12}\t{:.12}\t{:.12}\t{:.12}",
+            sample.atlas,
+            u8::from(sample.correct),
+            sample.decision.score,
+            sample.decision.score_margin,
+            sample.decision.mean_attribute_entropy,
+            sample.decision.min_attribute_margin,
+        )?;
+    }
+    writer.flush()?;
+    Ok(())
 }
 
 fn ratio(numerator: usize, denominator: usize) -> Result<f64, std::num::TryFromIntError> {
