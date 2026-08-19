@@ -1,0 +1,2 @@
+phase	candidate	weights	checkpoints	learned_parameters	triple_correct	triple_total	board_failures	board_total	raw_board_accuracy	decision
+research	board-v7-frozen-winner-control	0.44/0.36/0.10/0.10	4	177016	64646	65536	94	8192	0.988525391	reject control; misses raw gate

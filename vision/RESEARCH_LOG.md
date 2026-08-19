@@ -531,3 +531,11 @@ counts, filename contract, themes, profiles, DPRs, widths, and seeds. Native
 inspection of harsh occlusion and compound atlases confirmed intact grids and
 human-readable evidence. The pre-training digest is
 `a8b5c19760547bc262a0946b2f15b31c15c39a5dc5feeb42124d69d61e5437e4`.
+
+**Frozen v7 control on v8 research.** The unmodified four-checkpoint v7 winner
+with its already frozen `0.44/0.36/0.10/0.10` weights scored 8,098/8,192 raw
+boards: 98.8525391% accuracy with 94 failures. Triple accuracy was
+64,646/65,536 (98.6419678%). This is a control measurement, not a selectable
+v8 candidate, and it misses the v8 raw research gate by 13 failures. No guard
+or abstention altered a prediction, and the v8 sealed corpus remained
+evaluator-unopened.
