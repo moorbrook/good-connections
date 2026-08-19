@@ -1,7 +1,7 @@
 # Board-v7 raw multi-checkpoint ensemble evaluator
 
-The native `vision` evaluator has optional, evaluation-only two- and
-three-checkpoint modes for measuring whether independently trained instances
+The native `vision` evaluator has optional, evaluation-only two-, three-, and
+four-checkpoint modes for measuring whether independently trained instances
 of the existing specialist-dilated-residual policy complement one another. It
 does not change the policy topology, browser checkpoint, or default
 single-checkpoint path.
@@ -41,6 +41,23 @@ every set logit, board score, and attribute logit. `--ensemble-weights` is
 required with the third checkpoint and cannot be combined with the two-model
 `--ensemble-primary-weight` flag. A third checkpoint without the second, or
 weights supplied without a third checkpoint, is rejected.
+
+To evaluate four checkpoints, add a fourth directory and four positive
+weights. The evaluator normalizes these weights to sum to one:
+
+```sh
+  --ensemble-third-output-dir vision-artifacts/candidate-c \
+  --ensemble-fourth-output-dir vision-artifacts/candidate-d \
+  --ensemble-four-weights 1 2 3 4
+```
+
+The four-model path computes `W1 * primary + W2 * secondary + W3 * third +
+W4 * fourth` for every set logit, board score, and attribute logit.
+`--ensemble-four-weights` requires both the second and third checkpoint
+directories, cannot be combined with `--ensemble-weights` or
+`--ensemble-primary-weight`, and a fourth checkpoint without four weights is
+rejected. The three-checkpoint invocation remains unchanged when the fourth
+directory is omitted.
 
 Each checkpoint is loaded into its own strict FrankenTorch session. For the
 triple metrics, the evaluator averages corresponding set logits and attribute

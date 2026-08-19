@@ -60,12 +60,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 graph_boundary: third_graph_boundary,
             });
         }
-        let weights = config.ensemble_weights.unwrap_or([
-            config.ensemble_primary_weight,
-            1.0 - config.ensemble_primary_weight,
-            0.0,
-        ]);
-        if third.is_some() {
+        let mut fourth = None;
+        if let Some(fourth_output_dir) = config.ensemble_fourth_output_dir.as_ref() {
+            let mut fourth_session = FrankenTorchSession::new(ExecutionMode::Strict);
+            let fourth_model = VisualSetPolicy::new(&mut fourth_session)?;
+            let fourth_checkpoint = fourth_output_dir.join("set-vision.ftsv");
+            let fourth_state = ft_serialize::load_state_dict(&fourth_checkpoint)?;
+            fourth_model.load_state_dict(&mut fourth_session, &fourth_state, true)?;
+            let fourth_graph_boundary = fourth_session.autograd_graph_node_count();
+            println!(
+                "ensemble_fourth_checkpoint: {}",
+                fourth_checkpoint.display()
+            );
+            fourth = Some(EnsembleMember {
+                session: fourth_session,
+                model: fourth_model,
+                graph_boundary: fourth_graph_boundary,
+            });
+        }
+        let weights = if let Some(weights) = config.ensemble_four_weights {
+            weights
+        } else if let Some(weights) = config.ensemble_weights {
+            [weights[0], weights[1], weights[2], 0.0]
+        } else {
+            [
+                config.ensemble_primary_weight,
+                1.0 - config.ensemble_primary_weight,
+                0.0,
+                0.0,
+            ]
+        };
+        if fourth.is_some() {
+            println!(
+                "ensemble_weights: {:.17},{:.17},{:.17},{:.17}",
+                weights[0], weights[1], weights[2], weights[3]
+            );
+        } else if third.is_some() {
             println!(
                 "ensemble_weights: {:.17},{:.17},{:.17}",
                 weights[0], weights[1], weights[2]
@@ -81,6 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             model: ensemble_model,
             graph_boundary,
             third,
+            fourth,
             weights,
         })
     } else {
@@ -228,7 +259,8 @@ struct EnsemblePolicy {
     model: VisualSetPolicy,
     graph_boundary: usize,
     third: Option<EnsembleMember>,
-    weights: [f64; 3],
+    fourth: Option<EnsembleMember>,
+    weights: [f64; 4],
 }
 
 #[derive(Debug)]
@@ -293,11 +325,79 @@ fn evaluate(
         if let Some(third) = ensemble.third.as_mut() {
             third.session.no_grad_enter();
         }
+        if let Some(fourth) = ensemble.fourth.as_mut() {
+            fourth.session.no_grad_enter();
+        }
     }
     for _ in 0..batches {
         let batch = atlases.make_batch(&mut triple_rng, BATCH_SIZE, false);
         let (set_values, attribute_values) = if let Some(ensemble) = ensemble.as_deref_mut() {
-            if ensemble.third.is_some() {
+            if ensemble.fourth.is_some() {
+                let input = session.tensor_variable(
+                    batch.pixels.clone(),
+                    vec![BATCH_SIZE, 3, CARD_PIXELS],
+                    false,
+                )?;
+                let (set_logits, attribute_logits) =
+                    model.forward_with_attributes(session, input)?;
+                let ensemble_input = ensemble.session.tensor_variable(
+                    batch.pixels.clone(),
+                    vec![BATCH_SIZE, 3, CARD_PIXELS],
+                    false,
+                )?;
+                let (ensemble_set_logits, ensemble_attribute_logits) = ensemble
+                    .model
+                    .forward_with_attributes(&mut ensemble.session, ensemble_input)?;
+                let third = ensemble
+                    .third
+                    .as_mut()
+                    .ok_or("third ensemble model disappeared")?;
+                let third_input = third.session.tensor_variable(
+                    batch.pixels.clone(),
+                    vec![BATCH_SIZE, 3, CARD_PIXELS],
+                    false,
+                )?;
+                let (third_set_logits, third_attribute_logits) = third
+                    .model
+                    .forward_with_attributes(&mut third.session, third_input)?;
+                let fourth = ensemble
+                    .fourth
+                    .as_mut()
+                    .ok_or("fourth ensemble model disappeared")?;
+                let fourth_input = fourth.session.tensor_variable(
+                    batch.pixels,
+                    vec![BATCH_SIZE, 3, CARD_PIXELS],
+                    false,
+                )?;
+                let (fourth_set_logits, fourth_attribute_logits) = fourth
+                    .model
+                    .forward_with_attributes(&mut fourth.session, fourth_input)?;
+                let primary_set_values = session.tensor_values(set_logits)?;
+                let ensemble_set_values = ensemble.session.tensor_values(ensemble_set_logits)?;
+                let third_set_values = third.session.tensor_values(third_set_logits)?;
+                let fourth_set_values = fourth.session.tensor_values(fourth_set_logits)?;
+                let primary_attribute_values = session.tensor_values(attribute_logits)?;
+                let ensemble_attribute_values =
+                    ensemble.session.tensor_values(ensemble_attribute_logits)?;
+                let third_attribute_values = third.session.tensor_values(third_attribute_logits)?;
+                let fourth_attribute_values =
+                    fourth.session.tensor_values(fourth_attribute_logits)?;
+                let set_values = weighted_average_four(
+                    &primary_set_values,
+                    &ensemble_set_values,
+                    &third_set_values,
+                    &fourth_set_values,
+                    ensemble.weights,
+                )?;
+                let attribute_values = weighted_average_four(
+                    &primary_attribute_values,
+                    &ensemble_attribute_values,
+                    &third_attribute_values,
+                    &fourth_attribute_values,
+                    ensemble.weights,
+                )?;
+                (set_values, attribute_values)
+            } else if ensemble.third.is_some() {
                 let input = session.tensor_variable(
                     batch.pixels.clone(),
                     vec![BATCH_SIZE, 3, CARD_PIXELS],
@@ -336,13 +436,21 @@ fn evaluate(
                     &primary_set_values,
                     &ensemble_set_values,
                     &third_set_values,
-                    ensemble.weights,
+                    [
+                        ensemble.weights[0],
+                        ensemble.weights[1],
+                        ensemble.weights[2],
+                    ],
                 )?;
                 let attribute_values = weighted_average_three(
                     &primary_attribute_values,
                     &ensemble_attribute_values,
                     &third_attribute_values,
-                    ensemble.weights,
+                    [
+                        ensemble.weights[0],
+                        ensemble.weights[1],
+                        ensemble.weights[2],
+                    ],
                 )?;
                 (set_values, attribute_values)
             } else {
@@ -412,13 +520,49 @@ fn evaluate(
             if let Some(third) = ensemble.third.as_mut() {
                 third.session.truncate_autograd_graph(third.graph_boundary);
             }
+            if let Some(fourth) = ensemble.fourth.as_mut() {
+                fourth
+                    .session
+                    .truncate_autograd_graph(fourth.graph_boundary);
+            }
         }
     }
     let mut board_failures = 0_usize;
     for _ in 0..boards {
         let board = atlases.make_board(&mut board_rng, BOARD_CARDS);
         let output = if let Some(ensemble) = ensemble.as_deref_mut() {
-            if ensemble.third.is_some() {
+            if ensemble.fourth.is_some() {
+                let primary = model.score_board(session, board.pixels.clone(), BOARD_CARDS)?;
+                let secondary = ensemble.model.score_board(
+                    &mut ensemble.session,
+                    board.pixels.clone(),
+                    BOARD_CARDS,
+                )?;
+                let third = ensemble
+                    .third
+                    .as_mut()
+                    .ok_or("third ensemble model disappeared")?;
+                let tertiary = third.model.score_board(
+                    &mut third.session,
+                    board.pixels.clone(),
+                    BOARD_CARDS,
+                )?;
+                let fourth = ensemble
+                    .fourth
+                    .as_mut()
+                    .ok_or("fourth ensemble model disappeared")?;
+                let quaternary =
+                    fourth
+                        .model
+                        .score_board(&mut fourth.session, board.pixels, BOARD_CARDS)?;
+                average_board_scores_four(
+                    &primary,
+                    &secondary,
+                    &tertiary,
+                    &quaternary,
+                    ensemble.weights,
+                )?
+            } else if ensemble.third.is_some() {
                 let primary = model.score_board(session, board.pixels.clone(), BOARD_CARDS)?;
                 let secondary = ensemble.model.score_board(
                     &mut ensemble.session,
@@ -433,7 +577,16 @@ fn evaluate(
                     third
                         .model
                         .score_board(&mut third.session, board.pixels, BOARD_CARDS)?;
-                average_board_scores_three(&primary, &secondary, &tertiary, ensemble.weights)?
+                average_board_scores_three(
+                    &primary,
+                    &secondary,
+                    &tertiary,
+                    [
+                        ensemble.weights[0],
+                        ensemble.weights[1],
+                        ensemble.weights[2],
+                    ],
+                )?
             } else {
                 let primary = model.score_board(session, board.pixels.clone(), BOARD_CARDS)?;
                 let secondary =
@@ -513,6 +666,11 @@ fn evaluate(
             if let Some(third) = ensemble.third.as_mut() {
                 third.session.truncate_autograd_graph(third.graph_boundary);
             }
+            if let Some(fourth) = ensemble.fourth.as_mut() {
+                fourth
+                    .session
+                    .truncate_autograd_graph(fourth.graph_boundary);
+            }
         }
     }
     session.no_grad_exit();
@@ -520,6 +678,9 @@ fn evaluate(
         ensemble.session.no_grad_exit();
         if let Some(third) = ensemble.third.as_mut() {
             third.session.no_grad_exit();
+        }
+        if let Some(fourth) = ensemble.fourth.as_mut() {
+            fourth.session.no_grad_exit();
         }
     }
     let triple_total = batches * BATCH_SIZE;
@@ -678,6 +839,81 @@ fn average_board_scores_three(
     })
 }
 
+fn weighted_average_four(
+    first: &[f64],
+    second: &[f64],
+    third: &[f64],
+    fourth: &[f64],
+    weights: [f64; 4],
+) -> Result<Vec<f64>, std::io::Error> {
+    validate_four_weights(weights)?;
+    if first.len() != second.len() || first.len() != third.len() || first.len() != fourth.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "four-model ensemble logit lengths differ: {}, {}, {}, {}",
+                first.len(),
+                second.len(),
+                third.len(),
+                fourth.len()
+            ),
+        ));
+    }
+    let mut averaged = Vec::with_capacity(first.len());
+    for (((&one, &two), &three), &four) in first.iter().zip(second).zip(third).zip(fourth) {
+        if !one.is_finite() || !two.is_finite() || !three.is_finite() || !four.is_finite() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "ensemble logits must be finite",
+            ));
+        }
+        let value = weights[0] * one + weights[1] * two + weights[2] * three + weights[3] * four;
+        if !value.is_finite() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "ensemble logit average must be finite",
+            ));
+        }
+        averaged.push(value);
+    }
+    Ok(averaged)
+}
+
+fn average_board_scores_four(
+    first: &BoardScores,
+    second: &BoardScores,
+    third: &BoardScores,
+    fourth: &BoardScores,
+    weights: [f64; 4],
+) -> Result<BoardScores, std::io::Error> {
+    if first.triples != second.triples
+        || first.triples != third.triples
+        || first.triples != fourth.triples
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "four-model ensemble triple ordering mismatch",
+        ));
+    }
+    Ok(BoardScores {
+        triples: first.triples.clone(),
+        scores: weighted_average_four(
+            &first.scores,
+            &second.scores,
+            &third.scores,
+            &fourth.scores,
+            weights,
+        )?,
+        attribute_logits: weighted_average_four(
+            &first.attribute_logits,
+            &second.attribute_logits,
+            &third.attribute_logits,
+            &fourth.attribute_logits,
+            weights,
+        )?,
+    })
+}
+
 fn validate_primary_weight(primary_weight: f64) -> Result<(), std::io::Error> {
     if !(primary_weight.is_finite() && 0.0 < primary_weight && primary_weight < 1.0) {
         return Err(std::io::Error::new(
@@ -703,6 +939,26 @@ fn validate_three_weights(weights: [f64; 3]) -> Result<(), std::io::Error> {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "three ensemble weights must sum to one",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_four_weights(weights: [f64; 4]) -> Result<(), std::io::Error> {
+    if weights
+        .iter()
+        .any(|weight| !weight.is_finite() || *weight <= 0.0)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "four ensemble weights must be finite and positive",
+        ));
+    }
+    let total = weights.iter().sum::<f64>();
+    if !total.is_finite() || (total - 1.0).abs() > 1.0e-9 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "four ensemble weights must sum to one",
         ));
     }
     Ok(())
@@ -761,8 +1017,8 @@ fn predicted_attributes(values: &[f64]) -> [usize; 4] {
 #[cfg(test)]
 mod tests {
     use super::{
-        BoardScores, average_board_scores, average_board_scores_three, average_logits,
-        weighted_average_three,
+        BoardScores, average_board_scores, average_board_scores_four, average_board_scores_three,
+        average_logits, weighted_average_four, weighted_average_three,
     };
 
     #[test]
@@ -782,6 +1038,19 @@ mod tests {
         let averaged =
             weighted_average_three(&[1.0, 2.0], &[3.0, 4.0], &[5.0, 6.0], [0.25, 0.25, 0.5]).ok();
         assert_eq!(averaged, Some(vec![3.5, 4.5]));
+    }
+
+    #[test]
+    fn four_model_weighted_average_uses_all_four_logits() {
+        let averaged = weighted_average_four(
+            &[1.0, 2.0],
+            &[3.0, 4.0],
+            &[5.0, 6.0],
+            &[7.0, 8.0],
+            [0.1, 0.2, 0.3, 0.4],
+        )
+        .ok();
+        assert_eq!(averaged, Some(vec![5.0, 6.0]));
     }
 
     #[test]
@@ -869,6 +1138,40 @@ mod tests {
         assert_eq!(
             averaged.map(|scores| scores.attribute_logits),
             Some(vec![3.5, 5.5, 7.5])
+        );
+    }
+
+    #[test]
+    fn four_model_board_average_combines_scores_and_attributes() {
+        let first = BoardScores {
+            triples: vec![[0, 1, 2]],
+            scores: vec![1.0, 3.0],
+            attribute_logits: vec![1.0, 3.0, 5.0],
+        };
+        let second = BoardScores {
+            triples: first.triples.clone(),
+            scores: vec![3.0, 5.0],
+            attribute_logits: vec![3.0, 5.0, 7.0],
+        };
+        let third = BoardScores {
+            triples: first.triples.clone(),
+            scores: vec![5.0, 7.0],
+            attribute_logits: vec![5.0, 7.0, 9.0],
+        };
+        let fourth = BoardScores {
+            triples: first.triples.clone(),
+            scores: vec![7.0, 9.0],
+            attribute_logits: vec![7.0, 9.0, 11.0],
+        };
+        let averaged =
+            average_board_scores_four(&first, &second, &third, &fourth, [0.1, 0.2, 0.3, 0.4]).ok();
+        assert_eq!(
+            averaged.as_ref().map(|scores| scores.scores.clone()),
+            Some(vec![5.0, 7.0])
+        );
+        assert_eq!(
+            averaged.map(|scores| scores.attribute_logits),
+            Some(vec![5.0, 7.0, 9.0])
         );
     }
 
