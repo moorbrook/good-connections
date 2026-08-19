@@ -83,9 +83,9 @@ Do not pass the sealed directory to an evaluator while candidates are being
 ranked. The sealed digest is an integrity record, not a prediction result.
 
 For a CSS width `w`, expected PNG dimensions are
-`(52 + 9w) * dpr` by `(52 + 9 round(140w/190)) * dpr`. The loader area-resamples
-each card to its fixed 190x140 RGB input. The filename's `-dpr2` token is part
-of the data contract.
+`(52 + 9w) * dpr` by `(52 + 9 round(140w/190)) * dpr`. Those are source-capture
+dimensions; the loader area-resamples each card to the fixed 30x21 RGB model
+input. The filename's `-dpr2` token is part of the data contract.
 
 ## Rendering and integrity
 
@@ -139,9 +139,11 @@ without turning the cards into missing-information examples.
 
 ## Raw research selection
 
-The full research corpus is evaluated as three sequential 172-atlas shards so
-a 24 GB machine never loads all 516 atlases at once. Every board counts at
-100% raw coverage. The fixed research allocation is:
+The full research corpus is evaluated as three sequential 172-atlas shards to
+give each procedural seed an exact independently seeded share of the score.
+The 30x21 model input does not require this split for memory; the shard layout
+is a balanced, locked evaluation protocol. Every board counts at 100% raw
+coverage. The fixed research allocation is:
 
 | Atlas seed | Triple RNG seed | Board RNG seed | Triple batches | Raw boards |
 | ---: | ---: | ---: | ---: | ---: |
