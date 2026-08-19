@@ -23,13 +23,17 @@ The transform plan is bounded as follows:
 | Blur | 0.20 | 3x3 `[1,2,1] x [1,2,1] / 16` blend `0.35..=0.75` | no spatial label change |
 | Directional shadow | 0.18 | linear edge shading, strength `0.08..=0.24`, random angle `0..2pi` | multiplier remains at least `0.76` |
 | Sensor gamut | 0.35 | per-channel gain `0.97..=1.03`, offset `-0.008..=0.008` | small neutral gamut drift; no hue remapping |
-| Edge occlusion | 0.12 | edge-touching rectangle, width `1..=3` px, height `1..=2` px | alpha `0.25..=0.45`; only an outer edge band is covered |
+| Horizontal-band occlusion | 0.16 | full-width band, height `2..=8` input px; top `0.35..=0.56` of the 21px card | alpha `0.30..=0.50`, dark tint `0.04..=0.16`; fractional edge coverage preserves evidence above and below |
 | Existing photometric noise | always when `augment=true` | contrast `0.86..=1.14`; brightness `-0.055..=0.055`; per-pixel noise `-0.018..=0.018` | final pixels clamped to `[0,1]` |
 
 The execution order is geometry, blur, existing photometric transform, gamut,
-shadow, edge occlusion, and final clamp. The small geometric ranges and
-edge-only occlusion are intentional: they model capture variation without
-destroying the symbol, count, fill, or colour evidence needed by the labels.
+shadow, horizontal-band occlusion, and final clamp. The small geometric ranges
+and central, translucent occlusion are intentional: they model the board-v7
+capture band without destroying the symbol, count, fill, or colour evidence
+needed by the labels. The band height is deliberately randomized in input
+pixels; in the renderer's 190x140 reference-card coordinates, the board-v7
+22px CSS band corresponds to roughly 14--50 pixels across the locked source
+widths.
 
 ## Focused verification
 
@@ -37,7 +41,8 @@ destroying the symbol, count, fill, or colour evidence needed by the labels.
 
 - exact deterministic output for equal seeds;
 - output length, finiteness, and `[0,1]` bounds over 512 sampled cards;
-- geometry and edge-occlusion bounds over 10,000 sampled plans; and
+- geometry and horizontal-band bounds over 10,000 sampled plans, including
+  fractional edge coverage; and
 - the existing `augment=false` exact-copy contract.
 
 Commands:
@@ -56,14 +61,16 @@ cargo test --release --manifest-path vision-data/Cargo.toml \
   augmentation_microbenchmark -- --ignored --nocapture
 ```
 
-On the Apple Silicon development machine, the measured run processed 4,096
-synthetic `30x21x3` cards in 34.530833 ms, or 8,430.4 ns/card. The previous
+On the Apple Silicon development machine, the horizontal-band variant measured
+4,096 synthetic `30x21x3` cards in 39.452167 ms, or 9,631.9 ns/card. The
+previous edge-occlusion candidate measured 8,430.4 ns/card in the preceding
+run, so replacing the edge rectangle with fractional full-width bands added
+about 1.20 us/card (roughly 14% in these runs). The previous
 contrast/brightness/noise-only implementation in the same benchmark took
-14.915708 ms, or 3,641.5 ns/card. Thus this candidate adds about 4.79 us/card
-and costs 2.31x the old augmentation path in this single-threaded microbench.
-The copy-only baseline was 1,336.1 ns/card. These are data-pipeline costs, not
-end-to-end training throughput, and should be remeasured alongside a training
-run if the candidate is selected.
+16.172209 ms, or 3,948.3 ns/card, making the new candidate about 2.44x that
+legacy augmentation path. The copy-only baseline was 1,268.6 ns/card. These
+are data-pipeline costs, not end-to-end training throughput, and should be
+remeasured alongside a training run if the candidate is selected.
 
 ## Status
 
