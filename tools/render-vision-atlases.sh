@@ -11,6 +11,11 @@ capture_profiles_arg=${6:-clean}
 device_scales_arg=${7:-1}
 chrome_bin='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 preview_log=$(mktemp /tmp/set-vision-preview.XXXXXX)
+preview_port=${VISION_PREVIEW_PORT:-4173}
+if [[ ! "$preview_port" =~ ^[0-9]+$ ]] || ((preview_port < 1024 || preview_port > 65535)); then
+  echo 'VISION_PREVIEW_PORT must be an integer from 1024 through 65535' >&2
+  exit 2
+fi
 
 case "$theme_filter" in
   all) themes=(classic nocturne atelier signal) ;;
@@ -51,7 +56,7 @@ done
 mkdir -p "$output_dir"
 cd "$project_root"
 npm run build
-npm run preview -- --host 127.0.0.1 --port 4173 --strictPort >"$preview_log" 2>&1 &
+npm run preview -- --host 127.0.0.1 --port "$preview_port" --strictPort >"$preview_log" 2>&1 &
 preview_pid=$!
 trap 'kill "$preview_pid" 2>/dev/null || true' EXIT
 
@@ -60,7 +65,7 @@ for _attempt in {1..50}; do
     cat "$preview_log" >&2
     exit 1
   fi
-  if curl --fail --silent http://127.0.0.1:4173/ >/dev/null; then
+  if curl --fail --silent "http://127.0.0.1:$preview_port/" >/dev/null; then
     break
   fi
   sleep 0.1
@@ -96,7 +101,7 @@ render_atlas() {
     --window-size="$window_width,$window_height" \
     --user-data-dir="$profile" \
     --screenshot="$output_dir/$output_name.png" \
-    "http://127.0.0.1:4173/?vision-atlas=$theme&vision-seed=$seed&vision-card-width=$card_width&vision-capture=$capture_profile" \
+    "http://127.0.0.1:$preview_port/?vision-atlas=$theme&vision-seed=$seed&vision-card-width=$card_width&vision-capture=$capture_profile" \
     >/dev/null 2>/dev/null || status=$?
   if ((status != 0 && status != 124 && status != 137)); then
     return "$status"
