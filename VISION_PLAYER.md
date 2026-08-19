@@ -82,6 +82,14 @@ separate sealed corpus was rendered and hashed before training and evaluated exa
 recipe and guard were frozen. The current raw model is not universally reliable under scale shifts;
 the extension therefore abstains conservatively instead of presenting a raw argmax as safe.
 
+Board-v6 tested two raw-model architecture changes on fresh research seeds at 100% action coverage.
+The 41,918-parameter control scored 86.82% (540 failures in 4,096 boards). A spatial-pyramid specialist
+regressed to 86.52% (552 failures) and was rejected. A parallel 3×3+5×5 specialist improved to
+87.38% (517 failures), mainly by reducing shadow errors, but worsened crop errors and remained far
+from the zero-failure promotion gate. The board-v6 sealed corpus therefore remains evaluator-
+unopened, neither candidate was deployed, and no abstention model participated in selection. Exact
+metrics are in `vision/BOARD_V6_RESULTS.tsv`.
+
 Generate atlases and run one model-search experiment with:
 
 ```sh

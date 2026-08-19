@@ -364,3 +364,64 @@ A 1,000-iteration benchmark measured 2.502 ms cached inference and 2.767 ms with
 depth increase. Candidate inputs include scale-normalized card segmentation or a small multi-scale
 specialist path. Any follow-up needs a newly generated sealed corpus; these board-v5 sealed examples
 may diagnose the completed cycle but may not select or tune the next model.
+
+## 2026-08-18 — Board-v6 scale-robustness architecture proposals
+
+**Reason for a new cycle.** Board-v5 exposed a repeatable learned-representation failure under both
+zoom-in/crop and scale-down/shadow profiles. Its sealed examples are retired from model selection.
+Before any board-v6 evaluation, the next cycle fixes new research seeds 13001–13002, sealed seeds
+14001–14002, disjoint source widths, the same production capture profiles, and an evaluator-unopened
+sealed corpus. Before the first evaluation, both corpora were rendered at the locked 240-image
+count and full-deck samples were visually inspected across every profile, theme, width extreme, and
+DPR. The research digest is
+`fe8bbd0f73643b20a36b93852d54a27c4f300e9b61f06ea9fbf36a3a865f34f8`; the still-unopened sealed
+digest is `6a7509f981d401f4b0f02830965193c1772d2e6a01c78d516f7e950ecdf8b09a`.
+
+**Control.** Evaluate the unchanged replicate-5 checkpoint on 4,096 new research boards. Candidate
+training remains fixed at data seed 490009, initialization seed 3935559000370003845, 20,000 steps,
+batch size 64, no augmentation, and the existing optimizer/loss recipe. Rank by research board
+failures at 100% raw action coverage, triple accuracy, then parameter count. Guard scores and
+abstention are excluded. Only a zero-failure research winner may see the new 10,000-board sealed
+corpus.
+
+**Experiment 1 — `specialist-spatial-pyramid`.** Preserve each specialist's full 8×6×8 local map
+and concatenate a non-overlapping 2×2 average-pooled summary before projection. Hypothesis: coarse
+quadrant evidence gives the learned projection enough context to tolerate scale changes while the
+unchanged local map preserves stripe and outline detail. This is learned feature aggregation, not
+attention or foreground segmentation.
+
+**Experiment 2 — `specialist-dual-kernel`.** Replace each specialist's eight-channel 3×3 filter bank
+with parallel four-channel 3×3 and four-channel 5×5 banks and concatenate their maps. Hypothesis:
+the two receptive-field sizes let each attribute head retain fine fill evidence and wider
+shape/count evidence under bidirectional scale shifts. This is a small multi-scale convolutional
+branch, not a transformer or an automated architecture search system.
+
+**Parity-probe correction.** An initial diagnostic compared MPSGraph's seed-490009 probe images to
+FrankenTorch's fixed seed-99005 images, creating a false loss/gradient mismatch. No full training or
+board-v6 candidate evaluation had run. Repeating a 5×5 diagnostic with seed 99005 on both sides
+matched loss (5.102340 versus 5.102339833) and gradients, identifying the harness input—not the new
+operator—as the cause. Experiment 1 remains the originally declared spatial-pyramid candidate.
+
+**Raw control result.** On the locked board-v6 research corpus, the unchanged checkpoint produced
+540 failures in 4,096 boards: raw board accuracy 0.868164, triple accuracy 0.894562, and attribute
+accuracy 0.972188. Profile failures were clean 5, blur 0, crop 243, shadow 259, low contrast 32, and
+JPEG 1. This confirms on new seeds that scale-shift profiles dominate the raw error budget.
+
+**Experiment 1 result.** `specialist-spatial-pyramid` passed the corrected parity probe at 44,990
+parameters (5.642668 versus 5.642668109 loss with matching gradients). Its 20,000-step run took
+111.105 seconds at 180.01 steps/s. It regressed to 552 raw board failures, board accuracy 0.865234,
+triple accuracy 0.900391, and attribute accuracy 0.969198. Low-contrast failures fell from 32 to 10,
+but shadow rose from 259 to 277 and crop was effectively flat at 244. Reject and remove the branch.
+
+**Experiment 2 result.** `specialist-dual-kernel` passed parity at the same 44,990 parameters
+(5.180300 versus 5.180300408 loss with matching gradients). Training took 166.221 seconds at 120.32
+steps/s. It achieved 517 raw board failures, board accuracy 0.873779, triple accuracy 0.910400, and
+attribute accuracy 0.974388. Shadow improved from 259 to 229 failures, but crop worsened from 243 to
+258. It wins the research ranking by 23 failures but remains far from the zero-failure promotion
+gate.
+
+**Decision.** Do not open board-v6 sealed data, fit an abstention guard, or deploy either candidate.
+Restore the shipped single-kernel source so it continues to match the browser checkpoint. Preserve
+the research artifacts and tracked `BOARD_V6_RESULTS.tsv`. The dual-kernel result is evidence for
+multi-scale features, but one seed and a 0.56-point absolute raw gain are not enough to adopt a
+slower policy or claim a general architectural law.

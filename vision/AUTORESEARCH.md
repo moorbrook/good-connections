@@ -245,3 +245,94 @@ triple accuracy 0.923113, and attribute accuracy 0.980396: 1,085 raw failures. T
 accepted 2,462 boards (24.62%) with 4 accepted failures, for 0.998375 accepted accuracy. Those four
 failures occurred under crop or shadow profiles. The board-v5 sealed corpus is now exposed and must
 not tune coefficients, thresholds, architecture, or future candidate selection.
+
+## Board-v6 scale-robustness architecture cycle (locked before results)
+
+Board-v5 is diagnosis only for this cycle. Its repeatable crop/zoom-in and shadow/scale-down
+failures justify two learned visual-policy candidates, but neither board-v5 split may select between
+them. Board-v6 uses new procedural seeds and source widths while retaining the same six capture
+profiles and production renderer.
+
+The research directory is `../vision-artifacts/board-v6-research-atlases` (240 PNGs):
+
+- seeds 13001–13002, all four themes, CSS widths 101, 149, 241, and 365, all six capture profiles,
+  DPR 1 (192 PNGs); and
+- the same seeds/themes, widths 127 and 311, profiles `clean`, `crop`, and `shadow`, true Chrome
+  DPR 2 screenshots (48 PNGs).
+
+The sealed directory is `../vision-artifacts/board-v6-sealed-atlases` (240 PNGs):
+
+- seeds 14001–14002, all four themes, CSS widths 109, 181, 269, and 377, all six capture profiles,
+  DPR 1 (192 PNGs); and
+- the same seeds/themes, widths 133 and 317, profiles `blur`, `crop`, and `shadow`, true Chrome
+  DPR 2 screenshots (48 PNGs).
+
+File counts, sorted per-file aggregate SHA-256 digests, and visual QA across every profile, theme,
+width extreme, and DPR are locked before any board-v6 evaluation. The sealed directory remains
+evaluator-unopened until a research winner satisfies the promotion gate.
+
+The locked sorted per-file aggregate SHA-256 digests are:
+
+- research: `fe8bbd0f73643b20a36b93852d54a27c4f300e9b61f06ea9fbf36a3a865f34f8`;
+- sealed: `6a7509f981d401f4b0f02830965193c1772d2e6a01c78d516f7e950ecdf8b09a`.
+
+Before either digest was recorded, representative full-deck atlases were visually inspected across
+all six profiles, all four themes, both width extremes, and DPR 1/2. Card grids, capture transforms,
+labels-by-position, and image boundaries were intact.
+
+The unchanged replicate-5 checkpoint is evaluated once on 4,096 board-v6 research boards and 512
+balanced triple batches to establish the control. Each candidate then uses the same original
+training atlases, data seed 490009, initialization seed 3935559000370003845, 20,000 MPSGraph steps,
+batch size 64, AdamW recipe, no augmentation, auxiliary attribute loss, and board-v6 evaluator.
+Every topology change must pass the one-step fixed-batch MPSGraph/FrankenTorch loss and shared-weight
+gradient parity probe before its full run.
+
+The two predeclared candidates are independent changes from the unchanged control:
+
+1. `specialist-spatial-pyramid`: retain every specialist's flattened 8×6×8 local feature map and
+   concatenate a 2×2 non-overlapping average summary (32 values) before its 24-wide projection.
+   This tests whether coarse spatial bins add scale-tolerant context without discarding fine fill
+   and outline evidence. It adds 3,072 projection weights total and no learned layer.
+2. `specialist-dual-kernel`: replace each eight-channel 3×3 specialist convolution with parallel
+   four-channel 3×3 and four-channel 5×5 convolutions, concatenate their maps, and leave the
+   projection and all downstream code unchanged. This tests whether simultaneous local and wider
+   receptive fields handle symbol scale shifts better. It adds 3,072 convolution weights and no
+   net bias parameters.
+
+Rank the control and both candidates at 100% raw action coverage by fewest board-v6 research
+failures, then higher triple accuracy, then fewer parameters. Guard scores and abstention do not
+participate. A candidate must beat the control under that rule to survive; a
+candidate with any research board failure is not promotable and must not see the sealed corpus.
+Only a zero-failure research winner may receive the one permitted 10,000-board sealed evaluation.
+Do not fit or retune an abstention guard during these two raw-model architecture experiments.
+
+Parity-probe correction: an initial diagnostic accidentally compared an MPSGraph batch seeded with
+490009 against FrankenTorch's fixed seed-99005 probe and therefore produced a false mismatch. No
+candidate training or evaluation occurred under that diagnosis. A 5×5-only diagnostic confirmed
+that using seed 99005 on both sides restores matching loss and gradients; the original
+`specialist-spatial-pyramid` experiment therefore remains the scored candidate.
+
+### Board-v6 result (sealed corpus remains evaluator-unopened)
+
+The unchanged 41,918-parameter control achieved raw board accuracy 0.868164 with 540 failures in
+4,096 boards, triple accuracy 0.894562, and attribute accuracy 0.972188. Its failures by capture
+profile were clean 5, blur 0, crop 243, shadow 259, low contrast 32, and JPEG 1.
+
+`specialist-spatial-pyramid` passed fixed-batch backend parity at 44,990 parameters (loss 5.642668
+versus 5.642668109 with matching shared gradients). It trained for 20,000 steps in 111.105 seconds
+at 180.01 steps/s, then regressed to 552 raw board failures, board accuracy 0.865234, triple accuracy
+0.900391, and attribute accuracy 0.969198. Its profile failures were 10, 4, 244, 277, 10, and 7 in
+the order above. It is rejected and its implementation branch was removed.
+
+`specialist-dual-kernel` also passed backend parity at 44,990 parameters (loss 5.180300 versus
+5.180300408 with matching shared gradients). It trained in 166.221 seconds at 120.32 steps/s and
+improved the raw score to 517 failures, board accuracy 0.873779, triple accuracy 0.910400, and
+attribute accuracy 0.974388. Its profile failures were clean 0, blur 3, crop 258, shadow 229, low
+contrast 25, and JPEG 2. It wins the locked research ranking by 23 fewer raw failures than control,
+but it is not promotable because it has 517 research failures. Its gain is uneven: shadow improved
+by 30 failures while crop regressed by 15.
+
+Consequently the board-v6 sealed corpus was not passed to any evaluator, no abstention model was
+fitted, the browser checkpoint was not changed, and the shipped single-kernel topology remains the
+source default. Both experimental checkpoints and logs remain under
+`../vision-artifacts/autoresearch-v6/`; the compact tracked result is `BOARD_V6_RESULTS.tsv`.
