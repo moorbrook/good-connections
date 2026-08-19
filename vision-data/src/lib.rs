@@ -9,6 +9,9 @@ const ATLAS_PADDING: usize = 10;
 const DECK_SIZE: usize = 81;
 const ATTRIBUTE_VALUES: [f64; 3] = [0.0, 1.0, 2.0];
 
+type SamplingGroups = Vec<Vec<Vec<usize>>>;
+type SeedSamplingGroups = Vec<Vec<Vec<Vec<usize>>>>;
+
 #[derive(Debug)]
 pub struct Batch {
     pub pixels: Vec<f64>,
@@ -31,7 +34,11 @@ pub struct AtlasCollection {
     names: Vec<String>,
     // theme -> source raster -> procedural atlas. Sampling each level
     // independently prevents a populous fixed-width bucket from dominating.
-    sampling_groups: Vec<Vec<Vec<usize>>>,
+    sampling_groups: SamplingGroups,
+    // theme -> source raster -> procedural seed -> capture/raster variants.
+    // Training samples a seed family before choosing one of its variants so
+    // extra capture variants cannot crowd out procedural seed diversity.
+    seed_sampling_groups: SeedSamplingGroups,
 }
 
 impl AtlasCollection {
@@ -59,6 +66,8 @@ impl AtlasCollection {
             })
             .collect::<Vec<_>>();
         let mut groups = BTreeMap::<String, BTreeMap<String, Vec<usize>>>::new();
+        let mut seed_groups =
+            BTreeMap::<String, BTreeMap<String, BTreeMap<String, Vec<usize>>>>::new();
         for (index, name) in names.iter().enumerate() {
             let (theme, raster) = atlas_sampling_keys(name);
             groups
@@ -67,23 +76,59 @@ impl AtlasCollection {
                 .entry(raster.to_string())
                 .or_default()
                 .push(index);
+            seed_groups
+                .entry(theme.to_string())
+                .or_default()
+                .entry(raster.to_string())
+                .or_default()
+                .entry(atlas_seed_key(name).to_string())
+                .or_default()
+                .push(index);
         }
         let sampling_groups = groups
             .into_values()
             .map(|rasters| rasters.into_values().collect())
             .collect();
+        let seed_sampling_groups = seed_groups
+            .into_values()
+            .map(|rasters| {
+                rasters
+                    .into_values()
+                    .map(|seeds| seeds.into_values().collect())
+                    .collect()
+            })
+            .collect();
         Ok(Self {
             cards,
             names,
             sampling_groups,
+            seed_sampling_groups,
         })
     }
 
     pub fn make_batch(&self, rng: &mut Rng, size: usize, augment: bool) -> Batch {
+        self.make_batch_with_sampling(rng, size, augment, false)
+    }
+
+    /// Make a training batch with seed-stratified atlas sampling. This is a
+    /// training-only path; evaluation and probe callers should use
+    /// [`Self::make_batch`] to retain the locked evaluator stream.
+    pub fn make_training_batch(&self, rng: &mut Rng, size: usize, augment: bool) -> Batch {
+        self.make_batch_with_sampling(rng, size, augment, true)
+    }
+
+    fn make_batch_with_sampling(
+        &self,
+        rng: &mut Rng,
+        size: usize,
+        augment: bool,
+        seed_stratified: bool,
+    ) -> Batch {
         let mut pixels = Vec::with_capacity(size * 3 * CARD_PIXELS);
         let mut set_targets = Vec::with_capacity(size);
         let mut attribute_targets = Vec::with_capacity(size * 3 * 4);
         let mut atlas_indices = Vec::with_capacity(size);
+        let seed_offset = if seed_stratified { rng.next_u64() } else { 0 };
 
         for sample in 0..size {
             let is_set = sample % 2 == 0;
@@ -95,9 +140,19 @@ impl AtlasCollection {
                 negative_triple(rng)
             };
             shuffle_three(rng, &mut ids);
-            let theme_group = &self.sampling_groups[rng.index(self.sampling_groups.len())];
-            let raster_group = &theme_group[rng.index(theme_group.len())];
-            let theme = raster_group[rng.index(raster_group.len())];
+            let theme_group_index = rng.index(self.sampling_groups.len());
+            let raster_group_index = rng.index(self.sampling_groups[theme_group_index].len());
+            let theme = if seed_stratified {
+                sample_seed_stratified_atlas(
+                    rng,
+                    &self.seed_sampling_groups[theme_group_index][raster_group_index],
+                    sample,
+                    seed_offset,
+                )
+            } else {
+                let raster_group = &self.sampling_groups[theme_group_index][raster_group_index];
+                raster_group[rng.index(raster_group.len())]
+            };
             atlas_indices.push(theme);
             for id in ids {
                 append_card(&mut pixels, &self.cards[theme][id], rng, augment);
@@ -170,6 +225,24 @@ fn atlas_sampling_keys(name: &str) -> (&str, &str) {
         .filter(|(_, width)| width.chars().all(|character| character.is_ascii_digit()))
         .map_or("reference", |(_, width)| width);
     (theme, raster)
+}
+
+fn atlas_seed_key(name: &str) -> &str {
+    name.split('-')
+        .find(|part| !part.is_empty() && part.chars().all(|character| character.is_ascii_digit()))
+        .unwrap_or("unknown")
+}
+
+fn sample_seed_stratified_atlas(
+    rng: &mut Rng,
+    seed_groups: &[Vec<usize>],
+    sample: usize,
+    seed_offset: u64,
+) -> usize {
+    let group_count = u64::try_from(seed_groups.len()).unwrap_or(1);
+    let random_start = usize::try_from(seed_offset % group_count).unwrap_or(0);
+    let seed_group = &seed_groups[(random_start + sample) % seed_groups.len()];
+    seed_group[rng.index(seed_group.len())]
 }
 
 fn atlas_device_scale(name: &str) -> usize {
@@ -626,9 +699,10 @@ impl Rng {
 #[cfg(test)]
 mod tests {
     use super::{
-        AugmentationPlan, CARD_HEIGHT, CARD_WIDTH, Rng, append_card, area_resample_rgb,
-        atlas_device_scale, atlas_sampling_keys, board_has_set, completing_card, decode_card,
-        hard_negative_triple,
+        AtlasCollection, AugmentationPlan, CARD_HEIGHT, CARD_PIXELS, CARD_WIDTH, DECK_SIZE, Rng,
+        append_card, area_resample_rgb, atlas_device_scale, atlas_sampling_keys, atlas_seed_key,
+        board_has_set, completing_card, decode_card, hard_negative_triple,
+        sample_seed_stratified_atlas,
     };
 
     #[test]
@@ -636,6 +710,74 @@ mod tests {
         assert_eq!(atlas_sampling_keys("classic-0007-w128"), ("classic", "128"));
         assert_eq!(atlas_sampling_keys("signal-0192"), ("signal", "reference"));
         assert_eq!(atlas_sampling_keys("nocturne"), ("nocturne", "reference"));
+    }
+
+    #[test]
+    fn atlas_seed_key_separates_procedural_seed_from_capture_suffixes() {
+        assert_eq!(
+            atlas_seed_key("classic-15001-pocclusion-dpr2-w107"),
+            "15001"
+        );
+        assert_eq!(atlas_seed_key("signal-0007-w128"), "0007");
+        assert_eq!(atlas_seed_key("nocturne"), "unknown");
+    }
+
+    #[test]
+    fn seed_stratified_sampling_walks_each_seed_before_repeating() {
+        let seed_groups = vec![vec![11], vec![22], vec![33]];
+        let mut rng = Rng::new(0x5eed);
+        let sampled = (0..6)
+            .map(|sample| sample_seed_stratified_atlas(&mut rng, &seed_groups, sample, 1))
+            .collect::<Vec<_>>();
+        assert_eq!(sampled, [22, 33, 11, 22, 33, 11]);
+    }
+
+    #[test]
+    fn legacy_batch_sampling_path_remains_byte_identical() {
+        let collection = fixture_collection();
+        let mut legacy_rng = Rng::new(0x5eed);
+        let mut explicit_legacy_rng = Rng::new(0x5eed);
+        let legacy = collection.make_batch(&mut legacy_rng, 12, false);
+        let explicit_legacy =
+            collection.make_batch_with_sampling(&mut explicit_legacy_rng, 12, false, false);
+        assert_eq!(legacy.pixels, explicit_legacy.pixels);
+        assert_eq!(legacy.set_targets, explicit_legacy.set_targets);
+        assert_eq!(legacy.attribute_targets, explicit_legacy.attribute_targets);
+        assert_eq!(legacy.atlas_indices, explicit_legacy.atlas_indices);
+    }
+
+    #[test]
+    fn training_batch_cycles_seed_families_before_repeating() {
+        let collection = fixture_collection();
+        let mut rng = Rng::new(0x5eed);
+        let batch = collection.make_training_batch(&mut rng, 6, false);
+        let first_cycle = &batch.atlas_indices[..3];
+        let second_cycle = &batch.atlas_indices[3..];
+        assert_eq!(first_cycle.len(), 3);
+        assert_eq!(
+            first_cycle
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3
+        );
+        assert_eq!(second_cycle, first_cycle);
+    }
+
+    fn fixture_collection() -> AtlasCollection {
+        let card = vec![0.0; CARD_PIXELS];
+        let cards = vec![vec![card; DECK_SIZE]; 3];
+        AtlasCollection {
+            cards,
+            names: vec![
+                "classic-0001-w128".to_string(),
+                "classic-0002-w128".to_string(),
+                "classic-0003-w128".to_string(),
+            ],
+            sampling_groups: vec![vec![vec![0, 1, 2]]],
+            seed_sampling_groups: vec![vec![vec![vec![0], vec![1], vec![2]]]],
+        }
     }
 
     #[test]
@@ -715,7 +857,7 @@ mod tests {
 
     #[test]
     fn augmentation_is_deterministic_for_a_seed() {
-        let card = vec![0.37; super::CARD_PIXELS];
+        let card = vec![0.37; CARD_PIXELS];
         let mut first_rng = Rng::new(0x5eed);
         let mut second_rng = Rng::new(0x5eed);
         let mut first = Vec::new();
@@ -727,14 +869,14 @@ mod tests {
 
     #[test]
     fn augmentation_preserves_card_shape_and_unit_interval() {
-        let card = (0..super::CARD_PIXELS)
+        let card = (0..CARD_PIXELS)
             .map(|index| f64::from(u32::try_from(index % 17).unwrap_or(0)) / 16.0)
             .collect::<Vec<_>>();
         let mut rng = Rng::new(0xb0a7_0007);
         for _ in 0..512 {
             let mut output = Vec::new();
             append_card(&mut output, &card, &mut rng, true);
-            assert_eq!(output.len(), super::CARD_PIXELS);
+            assert_eq!(output.len(), CARD_PIXELS);
             assert!(output.iter().all(|pixel| pixel.is_finite()));
             assert!(output.iter().all(|pixel| (0.0..=1.0).contains(pixel)));
         }
@@ -778,7 +920,7 @@ mod tests {
 
     #[test]
     fn augmentation_false_is_an_exact_copy() {
-        let card = vec![0.37; super::CARD_PIXELS];
+        let card = vec![0.37; CARD_PIXELS];
         let mut rng = Rng::new(0x5eed);
         let mut output = Vec::new();
         append_card(&mut output, &card, &mut rng, false);
@@ -791,7 +933,7 @@ mod tests {
         use std::hint::black_box;
         use std::time::Instant;
 
-        let card = (0..super::CARD_PIXELS)
+        let card = (0..CARD_PIXELS)
             .map(|index| f64::from(u32::try_from(index % 17).unwrap_or(0)) / 16.0)
             .collect::<Vec<_>>();
         let iterations = 4_096;
@@ -799,7 +941,7 @@ mod tests {
         let augmented_start = Instant::now();
         let mut augmented_checksum = 0.0;
         for _ in 0..iterations {
-            let mut output = Vec::with_capacity(super::CARD_PIXELS);
+            let mut output = Vec::with_capacity(CARD_PIXELS);
             append_card(&mut output, &card, &mut augmented_rng, true);
             augmented_checksum += output.iter().sum::<f64>();
             black_box(output);
@@ -809,7 +951,7 @@ mod tests {
         let baseline_start = Instant::now();
         let mut baseline_checksum = 0.0;
         for _ in 0..iterations {
-            let mut output = Vec::with_capacity(super::CARD_PIXELS);
+            let mut output = Vec::with_capacity(CARD_PIXELS);
             append_card(&mut output, &card, &mut baseline_rng, false);
             baseline_checksum += output.iter().sum::<f64>();
             black_box(output);
@@ -832,7 +974,7 @@ mod tests {
         let legacy_start = Instant::now();
         let mut legacy_checksum = 0.0;
         for _ in 0..iterations {
-            let mut output = Vec::with_capacity(super::CARD_PIXELS);
+            let mut output = Vec::with_capacity(CARD_PIXELS);
             append_legacy_photometric(&mut output, &card, &mut legacy_rng);
             legacy_checksum += output.iter().sum::<f64>();
             black_box(output);
