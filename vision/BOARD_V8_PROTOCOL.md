@@ -193,14 +193,14 @@ eligible and must leave the sealed corpus evaluator-unopened.
 Only a research winner that clears the raw gate may receive one sealed run.
 The sealed run is a separate fixed 10,000-board raw assessment, not a tuning
 signal. Use three sequential shards with 3,334 / 3,333 / 3,333 boards for
-seeds 19001 / 19002 / 19003 and fixed board RNG seeds:
+seeds 19001 / 19002 / 19003 and fixed triple and board RNG seeds:
 
-| Atlas seed | Board RNG seed | Raw boards |
-| ---: | ---: | ---: |
-| 19001 | 304222009835245 | 3,334 |
-| 19002 | 304222009835246 | 3,333 |
-| 19003 | 304222009835247 | 3,333 |
-| **Total** |  | **10,000** |
+| Atlas seed | Triple RNG seed | Board RNG seed | Triple batches | Raw boards |
+| ---: | ---: | ---: | ---: | ---: |
+| 19001 | 317145488695021 | 304222009835245 | 342 | 3,334 |
+| 19002 | 317145488695022 | 304222009835246 | 341 | 3,333 |
+| 19003 | 317145488695023 | 304222009835247 | 341 | 3,333 |
+| **Total** |  |  | **1,024** | **10,000** |
 
 The sealed result must report only the predeclared raw outcome and must not
 change the model, weights, or protocol afterward. This protocol supports only

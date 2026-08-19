@@ -557,3 +557,13 @@ The first exported checkpoint passed a strict FrankenTorch state-dict load,
 forward-loss, and backward-gradient probe. The locked research evaluator also
 strict-loads all four checkpoints, so no permissive key adapter or alternate
 inference implementation enters the score.
+
+**Raw v8 research result.** The sole predeclared selectable combination, the
+four new replicas at fixed `0.25/0.25/0.25/0.25` weights, scored 8,151/8,192
+raw boards: 99.4995117% accuracy with 41 failures. Triple accuracy was
+65,211/65,536 (99.5040894%). It clears the at-most-81-failure research gate by
+40 failures and is frozen as the sole v8 research winner. The one-time sealed
+run therefore becomes eligible. Before that run, sealed triple RNG seeds
+`317145488695021–023` were added to `BOARD_V8_PROTOCOL.md`; the board seeds,
+allocation, uniform weights, checkpoint hashes, and sealed corpus digest were
+already fixed. No abstention or confidence guard enters either score.
