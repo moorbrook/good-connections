@@ -290,11 +290,247 @@ fn append_card(output: &mut Vec<f64>, card: &[f64], rng: &mut Rng, augment: bool
         output.extend_from_slice(card);
         return;
     }
+
+    let plan = AugmentationPlan::sample(rng);
+    let geometric = plan.needs_geometry().then(|| resample_card(card, &plan));
+    let blur_input = geometric.as_deref().unwrap_or(card);
+    let blurred = plan
+        .blur_strength
+        .map(|strength| blur_card(blur_input, strength));
+    let source = blurred.as_deref().unwrap_or(blur_input);
     let contrast = rng.range(0.86, 1.14);
     let brightness = rng.range(-0.055, 0.055);
-    for &pixel in card {
+    for (offset, &pixel) in source.iter().enumerate() {
         let noise = rng.range(-0.018, 0.018);
-        output.push(((pixel - 0.5) * contrast + 0.5 + brightness + noise).clamp(0.0, 1.0));
+        let channel = offset % CHANNELS;
+        let mut pixel = ((pixel - 0.5) * contrast + 0.5 + brightness + noise)
+            * plan.gamut_gains[channel]
+            + plan.gamut_offsets[channel];
+        let x = (offset / CHANNELS) % CARD_WIDTH;
+        let y = (offset / CHANNELS) / CARD_WIDTH;
+        pixel *= plan.shadow_factor(x, y);
+        if plan
+            .occlusion
+            .is_some_and(|occlusion| occlusion.contains(x, y))
+        {
+            pixel =
+                pixel * (1.0 - plan.occlusion_alpha) + plan.occlusion_tint * plan.occlusion_alpha;
+        }
+        output.push(pixel.clamp(0.0, 1.0));
+    }
+}
+
+/// Per-card training augmentation sampled from the same project RNG by both
+/// native backends. The geometric ranges are deliberately small: they model
+/// capture variation while retaining the card's symbol and colour labels.
+#[derive(Debug, Clone, Copy)]
+struct AugmentationPlan {
+    scale: f64,
+    rotation_radians: f64,
+    translate_x: f64,
+    translate_y: f64,
+    blur_strength: Option<f64>,
+    shadow_strength: f64,
+    shadow_x: f64,
+    shadow_y: f64,
+    gamut_gains: [f64; CHANNELS],
+    gamut_offsets: [f64; CHANNELS],
+    occlusion: Option<Occlusion>,
+    occlusion_alpha: f64,
+    occlusion_tint: f64,
+}
+
+impl AugmentationPlan {
+    fn sample(rng: &mut Rng) -> Self {
+        let scale = if rng.chance(0.38) {
+            rng.range(0.93, 1.07)
+        } else {
+            1.0
+        };
+        let rotation_radians = if rng.chance(0.28) {
+            rng.range(-4.0, 4.0).to_radians()
+        } else {
+            0.0
+        };
+        let translate_x = if rng.chance(0.32) {
+            rng.range(-1.2, 1.2)
+        } else {
+            0.0
+        };
+        let translate_y = if rng.chance(0.32) {
+            rng.range(-0.8, 0.8)
+        } else {
+            0.0
+        };
+        let blur_strength = rng.chance(0.20).then(|| rng.range(0.35, 0.75));
+        let (shadow_strength, shadow_x, shadow_y) = if rng.chance(0.18) {
+            let angle = rng.range(0.0, std::f64::consts::TAU);
+            (rng.range(0.08, 0.24), angle.cos(), angle.sin())
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+        let (gamut_gains, gamut_offsets) = if rng.chance(0.35) {
+            (
+                std::array::from_fn(|_| rng.range(0.97, 1.03)),
+                std::array::from_fn(|_| rng.range(-0.008, 0.008)),
+            )
+        } else {
+            ([1.0; CHANNELS], [0.0; CHANNELS])
+        };
+        let (occlusion, occlusion_alpha, occlusion_tint) = if rng.chance(0.12) {
+            let edge = rng.index(4);
+            let width = 1 + rng.index(3);
+            let height = 1 + rng.index(2);
+            let (x, y) = match edge {
+                0 => (rng.index(CARD_WIDTH - width + 1), 0),
+                1 => (rng.index(CARD_WIDTH - width + 1), CARD_HEIGHT - height),
+                2 => (0, rng.index(CARD_HEIGHT - height + 1)),
+                _ => (CARD_WIDTH - width, rng.index(CARD_HEIGHT - height + 1)),
+            };
+            (
+                Some(Occlusion {
+                    x,
+                    y,
+                    width,
+                    height,
+                }),
+                rng.range(0.25, 0.45),
+                rng.range(0.65, 0.95),
+            )
+        } else {
+            (None, 0.0, 0.0)
+        };
+        Self {
+            scale,
+            rotation_radians,
+            translate_x,
+            translate_y,
+            blur_strength,
+            shadow_strength,
+            shadow_x,
+            shadow_y,
+            gamut_gains,
+            gamut_offsets,
+            occlusion,
+            occlusion_alpha,
+            occlusion_tint,
+        }
+    }
+
+    fn needs_geometry(self) -> bool {
+        (self.scale - 1.0).abs() > f64::EPSILON
+            || self.rotation_radians.abs() > f64::EPSILON
+            || self.translate_x.abs() > f64::EPSILON
+            || self.translate_y.abs() > f64::EPSILON
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn shadow_factor(self, x: usize, y: usize) -> f64 {
+        if self.shadow_strength == 0.0 {
+            return 1.0;
+        }
+        let normalized_x = x as f64 / (CARD_WIDTH - 1) as f64 * 2.0 - 1.0;
+        let normalized_y = y as f64 / (CARD_HEIGHT - 1) as f64 * 2.0 - 1.0;
+        let edge = f64::midpoint(
+            1.0,
+            normalized_x * self.shadow_x + normalized_y * self.shadow_y,
+        )
+        .clamp(0.0, 1.0);
+        1.0 - self.shadow_strength * edge
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Occlusion {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+}
+
+impl Occlusion {
+    fn contains(self, x: usize, y: usize) -> bool {
+        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn resample_card(card: &[f64], plan: &AugmentationPlan) -> Vec<f64> {
+    let mut output = vec![0.0; card.len()];
+    let center_x = (CARD_WIDTH - 1) as f64 * 0.5;
+    let center_y = (CARD_HEIGHT - 1) as f64 * 0.5;
+    let sine = plan.rotation_radians.sin();
+    let cosine = plan.rotation_radians.cos();
+    let max_x = (CARD_WIDTH - 1) as f64;
+    let max_y = (CARD_HEIGHT - 1) as f64;
+    for y in 0..CARD_HEIGHT {
+        for x in 0..CARD_WIDTH {
+            let centered_x = (x as f64 - center_x) / plan.scale;
+            let centered_y = (y as f64 - center_y) / plan.scale;
+            let source_x = (cosine * centered_x + sine * centered_y + center_x - plan.translate_x)
+                .clamp(0.0, max_x);
+            let source_y = (-sine * centered_x + cosine * centered_y + center_y - plan.translate_y)
+                .clamp(0.0, max_y);
+            for channel in 0..CHANNELS {
+                let offset = (y * CARD_WIDTH + x) * CHANNELS + channel;
+                output[offset] = bilinear_sample(card, source_x, source_y, channel);
+            }
+        }
+    }
+    output
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn bilinear_sample(card: &[f64], x: f64, y: f64, channel: usize) -> f64 {
+    let left = x.floor() as usize;
+    let top = y.floor() as usize;
+    let right = (left + 1).min(CARD_WIDTH - 1);
+    let bottom = (top + 1).min(CARD_HEIGHT - 1);
+    let x_weight = x - left as f64;
+    let y_weight = y - top as f64;
+    let top_left = card[(top * CARD_WIDTH + left) * CHANNELS + channel];
+    let top_right = card[(top * CARD_WIDTH + right) * CHANNELS + channel];
+    let bottom_left = card[(bottom * CARD_WIDTH + left) * CHANNELS + channel];
+    let bottom_right = card[(bottom * CARD_WIDTH + right) * CHANNELS + channel];
+    let top_value = top_left + (top_right - top_left) * x_weight;
+    let bottom_value = bottom_left + (bottom_right - bottom_left) * x_weight;
+    top_value + (bottom_value - top_value) * y_weight
+}
+
+fn blur_card(card: &[f64], strength: f64) -> Vec<f64> {
+    let mut output = vec![0.0; card.len()];
+    for y in 0..CARD_HEIGHT {
+        for x in 0..CARD_WIDTH {
+            for channel in 0..CHANNELS {
+                let mut weighted = 0.0;
+                for (dy, y_weight) in [(-1_i32, 1.0), (0, 2.0), (1, 1.0)] {
+                    let sample_y = offset_coordinate(y, dy, CARD_HEIGHT);
+                    for (dx, x_weight) in [(-1_i32, 1.0), (0, 2.0), (1, 1.0)] {
+                        let sample_x = offset_coordinate(x, dx, CARD_WIDTH);
+                        let offset = (sample_y * CARD_WIDTH + sample_x) * CHANNELS + channel;
+                        weighted += card[offset] * y_weight * x_weight;
+                    }
+                }
+                let offset = (y * CARD_WIDTH + x) * CHANNELS + channel;
+                let kernel_value = weighted / 16.0;
+                output[offset] = card[offset] + (kernel_value - card[offset]) * strength;
+            }
+        }
+    }
+    output
+}
+
+fn offset_coordinate(value: usize, delta: i32, limit: usize) -> usize {
+    if delta < 0 {
+        value.saturating_sub(usize::try_from(delta.unsigned_abs()).unwrap_or(0))
+    } else {
+        value
+            .saturating_add(usize::try_from(delta).unwrap_or(0))
+            .min(limit - 1)
     }
 }
 
@@ -388,6 +624,10 @@ impl Rng {
         usize::try_from(self.next_u64() % upper).unwrap_or(0)
     }
 
+    fn chance(&mut self, probability: f64) -> bool {
+        self.range(0.0, 1.0) < probability
+    }
+
     #[allow(clippy::cast_precision_loss)]
     fn range(&mut self, lower: f64, upper: f64) -> f64 {
         let unit = (self.next_u64() >> 11) as f64 / ((1_u64 << 53) as f64);
@@ -398,8 +638,9 @@ impl Rng {
 #[cfg(test)]
 mod tests {
     use super::{
-        CARD_HEIGHT, CARD_WIDTH, Rng, area_resample_rgb, atlas_device_scale, atlas_sampling_keys,
-        board_has_set, completing_card, decode_card, hard_negative_triple,
+        AugmentationPlan, CARD_HEIGHT, CARD_WIDTH, Rng, append_card, area_resample_rgb,
+        atlas_device_scale, atlas_sampling_keys, board_has_set, completing_card, decode_card,
+        hard_negative_triple,
     };
 
     #[test]
@@ -481,6 +722,133 @@ mod tests {
             assert_ne!(ids[0], ids[2]);
             assert_ne!(ids[1], ids[2]);
             assert_ne!(completing_card(ids[0], ids[1]), ids[2]);
+        }
+    }
+
+    #[test]
+    fn augmentation_is_deterministic_for_a_seed() {
+        let card = vec![0.37; super::CARD_PIXELS];
+        let mut first_rng = Rng::new(0x5eed);
+        let mut second_rng = Rng::new(0x5eed);
+        let mut first = Vec::new();
+        let mut second = Vec::new();
+        append_card(&mut first, &card, &mut first_rng, true);
+        append_card(&mut second, &card, &mut second_rng, true);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn augmentation_preserves_card_shape_and_unit_interval() {
+        let card = (0..super::CARD_PIXELS)
+            .map(|index| f64::from(u32::try_from(index % 17).unwrap_or(0)) / 16.0)
+            .collect::<Vec<_>>();
+        let mut rng = Rng::new(0xb0a7_0007);
+        for _ in 0..512 {
+            let mut output = Vec::new();
+            append_card(&mut output, &card, &mut rng, true);
+            assert_eq!(output.len(), super::CARD_PIXELS);
+            assert!(output.iter().all(|pixel| pixel.is_finite()));
+            assert!(output.iter().all(|pixel| (0.0..=1.0).contains(pixel)));
+        }
+    }
+
+    #[test]
+    fn sampled_geometry_and_occlusion_stay_within_label_preserving_bounds() {
+        let mut rng = Rng::new(0xface_0007);
+        for _ in 0..10_000 {
+            let plan = AugmentationPlan::sample(&mut rng);
+            assert!((0.93..=1.07).contains(&plan.scale));
+            assert!(plan.rotation_radians.abs() <= 4.0_f64.to_radians());
+            assert!(plan.translate_x.abs() <= 1.2);
+            assert!(plan.translate_y.abs() <= 0.8);
+            assert!(plan.shadow_strength <= 0.24);
+            if let Some(occlusion) = plan.occlusion {
+                let touches_edge = occlusion.x == 0
+                    || occlusion.y == 0
+                    || occlusion.x + occlusion.width == CARD_WIDTH
+                    || occlusion.y + occlusion.height == CARD_HEIGHT;
+                assert!(touches_edge);
+                assert!(occlusion.width <= 3);
+                assert!(occlusion.height <= 2);
+            }
+        }
+    }
+
+    #[test]
+    fn augmentation_false_is_an_exact_copy() {
+        let card = vec![0.37; super::CARD_PIXELS];
+        let mut rng = Rng::new(0x5eed);
+        let mut output = Vec::new();
+        append_card(&mut output, &card, &mut rng, false);
+        assert_eq!(output, card);
+    }
+
+    #[test]
+    #[ignore = "microbenchmark; run explicitly with --release --ignored"]
+    fn augmentation_microbenchmark() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let card = (0..super::CARD_PIXELS)
+            .map(|index| f64::from(u32::try_from(index % 17).unwrap_or(0)) / 16.0)
+            .collect::<Vec<_>>();
+        let iterations = 4_096;
+        let mut augmented_rng = Rng::new(0xface_0007);
+        let augmented_start = Instant::now();
+        let mut augmented_checksum = 0.0;
+        for _ in 0..iterations {
+            let mut output = Vec::with_capacity(super::CARD_PIXELS);
+            append_card(&mut output, &card, &mut augmented_rng, true);
+            augmented_checksum += output.iter().sum::<f64>();
+            black_box(output);
+        }
+        let augmented_elapsed = augmented_start.elapsed();
+        let mut baseline_rng = Rng::new(0xface_0007);
+        let baseline_start = Instant::now();
+        let mut baseline_checksum = 0.0;
+        for _ in 0..iterations {
+            let mut output = Vec::with_capacity(super::CARD_PIXELS);
+            append_card(&mut output, &card, &mut baseline_rng, false);
+            baseline_checksum += output.iter().sum::<f64>();
+            black_box(output);
+        }
+        let baseline_elapsed = baseline_start.elapsed();
+        let nanos_per_augmented_card =
+            augmented_elapsed.as_secs_f64() * 1.0e9 / f64::from(iterations);
+        let nanos_per_baseline_card =
+            baseline_elapsed.as_secs_f64() * 1.0e9 / f64::from(iterations);
+        println!(
+            "augmentation: {iterations} cards in {augmented_elapsed:?}; {nanos_per_augmented_card:.1} ns/card; checksum={augmented_checksum:.3}"
+        );
+        println!(
+            "copy baseline: {iterations} cards in {baseline_elapsed:?}; {nanos_per_baseline_card:.1} ns/card; checksum={baseline_checksum:.3}"
+        );
+        assert!(augmented_checksum.is_finite());
+        assert!(baseline_checksum.is_finite());
+
+        let mut legacy_rng = Rng::new(0xface_0007);
+        let legacy_start = Instant::now();
+        let mut legacy_checksum = 0.0;
+        for _ in 0..iterations {
+            let mut output = Vec::with_capacity(super::CARD_PIXELS);
+            append_legacy_photometric(&mut output, &card, &mut legacy_rng);
+            legacy_checksum += output.iter().sum::<f64>();
+            black_box(output);
+        }
+        let legacy_elapsed = legacy_start.elapsed();
+        let nanos_per_legacy_card = legacy_elapsed.as_secs_f64() * 1.0e9 / f64::from(iterations);
+        println!(
+            "legacy photometric: {iterations} cards in {legacy_elapsed:?}; {nanos_per_legacy_card:.1} ns/card; checksum={legacy_checksum:.3}"
+        );
+        assert!(legacy_checksum.is_finite());
+    }
+
+    fn append_legacy_photometric(output: &mut Vec<f64>, card: &[f64], rng: &mut Rng) {
+        let contrast = rng.range(0.86, 1.14);
+        let brightness = rng.range(-0.055, 0.055);
+        for &pixel in card {
+            let noise = rng.range(-0.018, 0.018);
+            output.push(((pixel - 0.5) * contrast + 0.5 + brightness + noise).clamp(0.0, 1.0));
         }
     }
 }
