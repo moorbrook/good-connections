@@ -2,7 +2,7 @@
 
 use ft_api::FrankenTorchSession;
 use ft_autograd::{AutogradError, TensorNodeId};
-use ft_nn::{Conv2d, Linear, Module};
+use ft_nn::{AdaptiveAvgPool2d, Conv2d, Linear, Module};
 pub use set_vision_contract::{
     ATTRIBUTE_COUNT, ATTRIBUTE_LOGITS, ATTRIBUTE_VALUE_COUNT, CARD_HEIGHT, CARD_PIXELS, CARD_WIDTH,
     CHANNELS,
@@ -17,6 +17,7 @@ const SPECIALIST_CHANNELS: usize = 8;
 const CONV_OUTPUT_HEIGHT: usize = 6;
 const CONV_OUTPUT_WIDTH: usize = 8;
 const SPECIALIST_FEATURES: usize = SPECIALIST_CHANNELS * CONV_OUTPUT_HEIGHT * CONV_OUTPUT_WIDTH;
+const FRONTEND_POOL_OUTPUT: (usize, usize) = (CONV_OUTPUT_HEIGHT, CONV_OUTPUT_WIDTH);
 
 #[derive(Debug)]
 pub struct BoardScores {
@@ -158,7 +159,7 @@ impl AttributeHead {
                 CONV_CHANNELS,
                 SPECIALIST_CHANNELS,
                 (3, 3),
-                (2, 2),
+                (1, 1),
                 (1, 1),
                 true,
             )?,
@@ -201,11 +202,12 @@ impl Module for AttributeHead {
 
 /// The one learned policy definition shared by training and browser inference.
 ///
-/// It has a shared low-level convolution, four attribute-specialist branches,
-/// and a learned permutation-invariant relation scorer. It is not a
-/// transformer, VLM, or VLA.
+/// It has a shared low-level convolution, an adaptive spatial pooling frontend,
+/// four attribute-specialist branches, and a learned permutation-invariant
+/// relation scorer. It is not a transformer, VLM, or VLA.
 pub struct VisualSetPolicy {
     shared_convolution: Conv2d,
+    frontend_pool: AdaptiveAvgPool2d,
     attribute_heads: [AttributeHead; ATTRIBUTE_COUNT],
     attribute_relation_in: Linear,
     attribute_relation_out: Linear,
@@ -233,10 +235,11 @@ impl VisualSetPolicy {
                 CHANNELS,
                 CONV_CHANNELS,
                 (5, 5),
-                (2, 2),
+                (1, 1),
                 (2, 2),
                 true,
             )?,
+            frontend_pool: AdaptiveAvgPool2d::new(FRONTEND_POOL_OUTPUT),
             attribute_heads: [
                 AttributeHead::new(session)?,
                 AttributeHead::new(session)?,
@@ -284,6 +287,7 @@ impl VisualSetPolicy {
         let encoded = session.tensor_permute(encoded, vec![0, 3, 1, 2])?;
         let encoded = self.shared_convolution.forward(session, encoded)?;
         let encoded = session.tensor_gelu(encoded)?;
+        let encoded = self.frontend_pool.forward(session, encoded)?;
         let attribute_logits = self
             .attribute_heads
             .iter()
@@ -402,6 +406,7 @@ impl Module for VisualSetPolicy {
     fn named_children(&self) -> Vec<(String, &dyn Module)> {
         let mut children: Vec<(String, &dyn Module)> = vec![
             ("shared_convolution".to_string(), &self.shared_convolution),
+            ("frontend_pool".to_string(), &self.frontend_pool),
             (
                 "attribute_relation_in".to_string(),
                 &self.attribute_relation_in,
@@ -427,8 +432,12 @@ impl Module for VisualSetPolicy {
 mod tests {
     use ft_api::FrankenTorchSession;
     use ft_core::ExecutionMode;
+    use ft_nn::Module;
 
-    use super::{BoardScores, CARD_PIXELS, PolicyError, VisualSetPolicy};
+    use super::{
+        ATTRIBUTE_LOGITS, BoardScores, CARD_HEIGHT, CARD_PIXELS, CARD_WIDTH, CHANNELS, PolicyError,
+        VisualSetPolicy,
+    };
 
     #[test]
     fn decision_diagnostics_rank_scores_and_measure_attribute_certainty() {
@@ -458,6 +467,39 @@ mod tests {
             Err(PolicyError::InvalidPixelCount { expected, actual: 1 })
                 if expected == 3 * CARD_PIXELS
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn adaptive_frontend_emits_the_fixed_specialist_map() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut session = FrankenTorchSession::new(ExecutionMode::Strict);
+        let policy = VisualSetPolicy::new(&mut session)?;
+        let input = session.tensor_variable(
+            vec![0.0; 2 * CHANNELS * CARD_HEIGHT * CARD_WIDTH],
+            vec![2, CHANNELS, CARD_HEIGHT, CARD_WIDTH],
+            false,
+        )?;
+        let shared = policy.shared_convolution.forward(&mut session, input)?;
+        assert_eq!(
+            session.tensor_shape(shared)?,
+            vec![2, 12, CARD_HEIGHT, CARD_WIDTH]
+        );
+        let pooled = policy.frontend_pool.forward(&mut session, shared)?;
+        assert_eq!(session.tensor_shape(pooled)?, vec![2, 12, 6, 8]);
+
+        let cards =
+            session.tensor_variable(vec![0.0; 2 * CARD_PIXELS], vec![2, CARD_PIXELS], false)?;
+        let logits = policy.attribute_logits_for_cards(&mut session, cards, 2)?;
+        assert_eq!(session.tensor_shape(logits)?, vec![2, ATTRIBUTE_LOGITS]);
+        let parameter_count = policy
+            .parameters()
+            .into_iter()
+            .map(|parameter| session.tensor_numel(parameter))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .sum::<usize>();
+        assert_eq!(parameter_count, 41_918);
         Ok(())
     }
 

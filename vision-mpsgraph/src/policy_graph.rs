@@ -41,6 +41,26 @@ struct Builder {
     random_state: u64,
 }
 
+#[derive(Clone, Copy)]
+struct ConvolutionSpec<'a> {
+    prefix: &'a str,
+    input_channels: usize,
+    output_channels: usize,
+    kernel: usize,
+    stride: usize,
+    padding: usize,
+}
+
+#[derive(Clone, Copy)]
+struct AdaptivePoolSpec {
+    batch: usize,
+    channels: usize,
+    input_height: usize,
+    input_width: usize,
+    output_height: usize,
+    output_width: usize,
+}
+
 impl Builder {
     fn new(random_state: u64) -> Self {
         Self {
@@ -150,21 +170,33 @@ impl Builder {
 
     fn convolution(
         &mut self,
-        prefix: &str,
         input: &MPSGraphTensor,
-        input_channels: usize,
-        output_channels: usize,
-        kernel: usize,
-        padding: usize,
+        spec: ConvolutionSpec<'_>,
     ) -> Retained<MPSGraphTensor> {
         let weight = self.parameter(
-            format!("{prefix}.weight"),
-            &[output_channels, input_channels, kernel, kernel],
+            format!("{}.weight", spec.prefix),
+            &[
+                spec.output_channels,
+                spec.input_channels,
+                spec.kernel,
+                spec.kernel,
+            ],
         );
-        let bias = self.zeros(format!("{prefix}.bias"), &[1, output_channels, 1, 1]);
+        let bias = self.zeros(
+            format!("{}.bias", spec.prefix),
+            &[1, spec.output_channels, 1, 1],
+        );
         let descriptor = unsafe {
             MPSGraphConvolution2DOpDescriptor::descriptorWithStrideInX_strideInY_dilationRateInX_dilationRateInY_groups_paddingLeft_paddingRight_paddingTop_paddingBottom_paddingStyle_dataLayout_weightsLayout(
-                2, 2, 1, 1, 1, padding, padding, padding, padding,
+                spec.stride,
+                spec.stride,
+                1,
+                1,
+                1,
+                spec.padding,
+                spec.padding,
+                spec.padding,
+                spec.padding,
                 MPSGraphPaddingStyle::Explicit,
                 MPSGraphTensorNamedDataLayout::NCHW,
                 MPSGraphTensorNamedDataLayout::OIHW,
@@ -196,6 +228,70 @@ impl Builder {
                 .concatTensors_dimension_name(&NSArray::from_slice(tensors), dimension, None)
         }
     }
+
+    /// Match `FrankenTorch`'s `AdaptiveAvgPool2d` fixed-window contract.
+    ///
+    /// Each output window uses `floor(i * input / output)` for its start and
+    /// `ceil((i + 1) * input / output)` for its end. Building the windows
+    /// explicitly keeps the training graph numerically matched with the
+    /// browser backend instead of substituting a different stride pool.
+    fn adaptive_avg_pool2d(
+        &self,
+        input: &MPSGraphTensor,
+        spec: AdaptivePoolSpec,
+    ) -> Retained<MPSGraphTensor> {
+        let axes = shape(&[2]);
+        let mut columns = Vec::with_capacity(spec.output_height * spec.output_width);
+        for output_y in 0..spec.output_height {
+            let height_start = output_y * spec.input_height / spec.output_height;
+            let height_end = ((output_y + 1) * spec.input_height)
+                .div_ceil(spec.output_height)
+                .min(spec.input_height);
+            let height_length = height_end - height_start;
+            for output_x in 0..spec.output_width {
+                let width_start = output_x * spec.input_width / spec.output_width;
+                let width_end = ((output_x + 1) * spec.input_width)
+                    .div_ceil(spec.output_width)
+                    .min(spec.input_width);
+                let width_length = width_end - width_start;
+                let height_slice = unsafe {
+                    self.graph.sliceTensor_dimension_start_length_name(
+                        input,
+                        2,
+                        height_start.cast_signed(),
+                        height_length.cast_signed(),
+                        None,
+                    )
+                };
+                let window = unsafe {
+                    self.graph.sliceTensor_dimension_start_length_name(
+                        &height_slice,
+                        3,
+                        width_start.cast_signed(),
+                        width_length.cast_signed(),
+                        None,
+                    )
+                };
+                let window = self.reshape(
+                    &window,
+                    &[spec.batch, spec.channels, height_length * width_length],
+                );
+                let pooled = unsafe { self.graph.meanOfTensor_axes_name(&window, &axes, None) };
+                columns.push(self.reshape(&pooled, &[spec.batch, spec.channels, 1]));
+            }
+        }
+        let column_refs = columns.iter().map(|tensor| &**tensor).collect::<Vec<_>>();
+        let pooled = self.concat(&column_refs, 2);
+        self.reshape(
+            &pooled,
+            &[
+                spec.batch,
+                spec.channels,
+                spec.output_height,
+                spec.output_width,
+            ],
+        )
+    }
 }
 
 impl PolicyGraph {
@@ -207,24 +303,41 @@ impl PolicyGraph {
             builder.placeholder(&[BATCH_SIZE * 3 * ATTRIBUTE_COUNT, ATTRIBUTE_VALUE_COUNT]);
 
         let shared = builder.convolution(
-            "shared_convolution",
             &pixels,
-            CHANNELS,
-            SHARED_CHANNELS,
-            5,
-            2,
+            ConvolutionSpec {
+                prefix: "shared_convolution",
+                input_channels: CHANNELS,
+                output_channels: SHARED_CHANNELS,
+                kernel: 5,
+                stride: 1,
+                padding: 2,
+            },
         );
         let shared = builder.activation(&shared);
+        let shared = builder.adaptive_avg_pool2d(
+            &shared,
+            AdaptivePoolSpec {
+                batch: CARD_COUNT,
+                channels: SHARED_CHANNELS,
+                input_height: CARD_HEIGHT,
+                input_width: CARD_WIDTH,
+                output_height: 6,
+                output_width: 8,
+            },
+        );
         let mut heads = Vec::with_capacity(ATTRIBUTE_COUNT);
         for index in 0..ATTRIBUTE_COUNT {
             let prefix = format!("attribute_head_{index}");
             let encoded = builder.convolution(
-                &format!("{prefix}.convolution"),
                 &shared,
-                SHARED_CHANNELS,
-                HEAD_CHANNELS,
-                3,
-                1,
+                ConvolutionSpec {
+                    prefix: &format!("{prefix}.convolution"),
+                    input_channels: SHARED_CHANNELS,
+                    output_channels: HEAD_CHANNELS,
+                    kernel: 3,
+                    stride: 1,
+                    padding: 1,
+                },
             );
             let encoded = builder.activation(&encoded);
             let encoded = builder.reshape(&encoded, &[CARD_COUNT, HEAD_FEATURES]);
