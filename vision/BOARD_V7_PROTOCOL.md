@@ -66,7 +66,7 @@ research and sealed corpora:
 
 - seeds `17001`–`17002`, all four themes, DPR 1 widths `97`, `211`, and `349`,
   with all eleven profiles: 264 PNG atlases;
-- the same seeds and themes at true Chrome DPR 2, widths `121` and `251`,
+- the same seeds and themes at true Chrome DPR 2, widths `139` and `251`,
   with `clean`, `crop`, `shadow`, `tilt`, and `occlusion`: 80 PNG atlases;
 - **344 PNG atlases total**, 172 per seed.
 
@@ -201,7 +201,7 @@ profiles='clean,blur,defocus,crop,shadow,lowcontrast,jpeg,tilt,occlusion,gamut,c
 dpr2_profiles='clean,crop,shadow,tilt,occlusion'
 
 tools/render-vision-atlases.sh "$training" 2 17001 all '97,211,349' "$profiles" 1
-tools/render-vision-atlases.sh "$training" 2 17001 all '121,251' "$dpr2_profiles" 2
+tools/render-vision-atlases.sh "$training" 2 17001 all '139,251' "$dpr2_profiles" 2
 tools/render-vision-atlases.sh "$research" 3 15001 all '83,157,293' "$profiles" 1
 tools/render-vision-atlases.sh "$research" 3 15001 all '107,277' "$dpr2_profiles" 2
 tools/render-vision-atlases.sh "$sealed" 3 16001 all '83,157,293' "$profiles" 1
