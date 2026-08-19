@@ -309,12 +309,10 @@ fn append_card(output: &mut Vec<f64>, card: &[f64], rng: &mut Rng, augment: bool
         let x = (offset / CHANNELS) % CARD_WIDTH;
         let y = (offset / CHANNELS) / CARD_WIDTH;
         pixel *= plan.shadow_factor(x, y);
-        if plan
-            .occlusion
-            .is_some_and(|occlusion| occlusion.contains(x, y))
-        {
-            pixel =
-                pixel * (1.0 - plan.occlusion_alpha) + plan.occlusion_tint * plan.occlusion_alpha;
+        if let Some(band) = plan.occlusion {
+            let coverage = band.coverage(y);
+            let alpha = plan.occlusion_alpha * coverage;
+            pixel = pixel * (1.0 - alpha) + plan.occlusion_tint * alpha;
         }
         output.push(pixel.clamp(0.0, 1.0));
     }
@@ -335,7 +333,7 @@ struct AugmentationPlan {
     shadow_y: f64,
     gamut_gains: [f64; CHANNELS],
     gamut_offsets: [f64; CHANNELS],
-    occlusion: Option<Occlusion>,
+    occlusion: Option<HorizontalBand>,
     occlusion_alpha: f64,
     occlusion_tint: f64,
 }
@@ -377,25 +375,13 @@ impl AugmentationPlan {
         } else {
             ([1.0; CHANNELS], [0.0; CHANNELS])
         };
-        let (occlusion, occlusion_alpha, occlusion_tint) = if rng.chance(0.12) {
-            let edge = rng.index(4);
-            let width = 1 + rng.index(3);
-            let height = 1 + rng.index(2);
-            let (x, y) = match edge {
-                0 => (rng.index(CARD_WIDTH - width + 1), 0),
-                1 => (rng.index(CARD_WIDTH - width + 1), CARD_HEIGHT - height),
-                2 => (0, rng.index(CARD_HEIGHT - height + 1)),
-                _ => (CARD_WIDTH - width, rng.index(CARD_HEIGHT - height + 1)),
-            };
+        let (occlusion, occlusion_alpha, occlusion_tint) = if rng.chance(0.16) {
+            let height = rng.range(2.0, 8.0);
+            let top = rng.range(0.35, 0.56) * f64::from(u32::try_from(CARD_HEIGHT).unwrap_or(0));
             (
-                Some(Occlusion {
-                    x,
-                    y,
-                    width,
-                    height,
-                }),
-                rng.range(0.25, 0.45),
-                rng.range(0.65, 0.95),
+                Some(HorizontalBand { top, height }),
+                rng.range(0.30, 0.50),
+                rng.range(0.04, 0.16),
             )
         } else {
             (None, 0.0, 0.0)
@@ -441,16 +427,18 @@ impl AugmentationPlan {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Occlusion {
-    x: usize,
-    y: usize,
-    width: usize,
-    height: usize,
+struct HorizontalBand {
+    top: f64,
+    height: f64,
 }
 
-impl Occlusion {
-    fn contains(self, x: usize, y: usize) -> bool {
-        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
+impl HorizontalBand {
+    #[allow(clippy::cast_precision_loss)]
+    fn coverage(self, y: usize) -> f64 {
+        let row_start = y as f64;
+        let row_end = row_start + 1.0;
+        let bottom = self.top + self.height;
+        (row_end.min(bottom) - row_start.max(self.top)).clamp(0.0, 1.0)
     }
 }
 
@@ -762,16 +750,30 @@ mod tests {
             assert!(plan.translate_x.abs() <= 1.2);
             assert!(plan.translate_y.abs() <= 0.8);
             assert!(plan.shadow_strength <= 0.24);
-            if let Some(occlusion) = plan.occlusion {
-                let touches_edge = occlusion.x == 0
-                    || occlusion.y == 0
-                    || occlusion.x + occlusion.width == CARD_WIDTH
-                    || occlusion.y + occlusion.height == CARD_HEIGHT;
-                assert!(touches_edge);
-                assert!(occlusion.width <= 3);
-                assert!(occlusion.height <= 2);
+            if let Some(band) = plan.occlusion {
+                let card_height = f64::from(u32::try_from(CARD_HEIGHT).unwrap_or(0));
+                assert!((0.35 * card_height..=0.56 * card_height).contains(&band.top));
+                assert!((2.0..=8.0).contains(&band.height));
+                assert!(band.top + band.height <= card_height);
+                let covered_height = (0..CARD_HEIGHT).map(|row| band.coverage(row)).sum::<f64>();
+                assert!((covered_height - band.height).abs() < 1.0e-12);
             }
         }
+    }
+
+    #[test]
+    fn horizontal_band_has_fractional_edges_and_spans_the_card() {
+        let band = super::HorizontalBand {
+            top: 8.25,
+            height: 3.5,
+        };
+        assert_eq!(band.coverage(7), 0.0);
+        assert!((band.coverage(8) - 0.75).abs() < 1.0e-12);
+        assert_eq!(band.coverage(9), 1.0);
+        assert_eq!(band.coverage(10), 1.0);
+        assert!((band.coverage(11) - 0.75).abs() < 1.0e-12);
+        assert_eq!(band.coverage(12), 0.0);
+        assert!((0..CARD_WIDTH).all(|_| (band.coverage(9) - 1.0).abs() < 1.0e-12));
     }
 
     #[test]
