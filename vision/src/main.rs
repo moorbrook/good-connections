@@ -519,6 +519,19 @@ struct AbstentionSample {
     strongest_is_set: bool,
     action: RawBoardAction,
     decision: BoardDecision,
+    score_summary: BoardScoreSummary,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BoardScoreSummary {
+    third_score: f64,
+    fifth_score: f64,
+    tenth_score: f64,
+    mean: f64,
+    standard_deviation: f64,
+    logsumexp: f64,
+    nonnegative_count: usize,
+    above_minus_one_count: usize,
 }
 
 #[derive(Debug)]
@@ -848,6 +861,8 @@ fn evaluate(
                 board.kind == BoardKind::HasSet && board.set_targets.get(best).copied() == Some(1.0)
             }
         };
+        let score_summary = summarize_board_scores(&output.scores)
+            .ok_or("policy produced too few finite scores for board diagnostics")?;
         abstention_samples.push(AbstentionSample {
             atlas: atlases.name(board.atlas_index).to_string(),
             correct,
@@ -855,6 +870,7 @@ fn evaluate(
             strongest_is_set: board.set_targets.get(best).copied() == Some(1.0),
             action,
             decision,
+            score_summary,
         });
         if !correct {
             let best_valid = output
@@ -1309,12 +1325,12 @@ fn write_abstention_samples(
     let mut writer = std::io::BufWriter::new(file);
     writeln!(
         writer,
-        "atlas\tcorrect\texpected_kind\tstrongest_is_set\taction\tscore\tscore_margin\tmean_attribute_entropy\tmin_attribute_margin"
+        "atlas\tcorrect\texpected_kind\tstrongest_is_set\taction\tscore\tscore_margin\tmean_attribute_entropy\tmin_attribute_margin\tthird_score\tfifth_score\ttenth_score\tscore_mean\tscore_standard_deviation\tscore_logsumexp\tnonnegative_count\tabove_minus_one_count"
     )?;
     for sample in samples {
         writeln!(
             writer,
-            "{}\t{}\t{:?}\t{}\t{:?}\t{:.12}\t{:.12}\t{:.12}\t{:.12}",
+            "{}\t{}\t{:?}\t{}\t{:?}\t{:.12}\t{:.12}\t{:.12}\t{:.12}\t{:.12}\t{:.12}\t{:.12}\t{:.12}\t{:.12}\t{:.12}\t{}\t{}",
             sample.atlas,
             u8::from(sample.correct),
             sample.expected_kind,
@@ -1324,10 +1340,54 @@ fn write_abstention_samples(
             sample.decision.score_margin,
             sample.decision.mean_attribute_entropy,
             sample.decision.min_attribute_margin,
+            sample.score_summary.third_score,
+            sample.score_summary.fifth_score,
+            sample.score_summary.tenth_score,
+            sample.score_summary.mean,
+            sample.score_summary.standard_deviation,
+            sample.score_summary.logsumexp,
+            sample.score_summary.nonnegative_count,
+            sample.score_summary.above_minus_one_count,
         )?;
     }
     writer.flush()?;
     Ok(())
+}
+
+fn summarize_board_scores(scores: &[f64]) -> Option<BoardScoreSummary> {
+    let mut ranked = scores
+        .iter()
+        .copied()
+        .filter(|score| score.is_finite())
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.total_cmp(left));
+    if ranked.len() < 10 {
+        return None;
+    }
+    let count = f64::from(u32::try_from(ranked.len()).ok()?);
+    let mean = ranked.iter().sum::<f64>() / count;
+    let variance = ranked
+        .iter()
+        .map(|score| (score - mean).powi(2))
+        .sum::<f64>()
+        / count;
+    let maximum = ranked[0];
+    let logsumexp = maximum
+        + ranked
+            .iter()
+            .map(|score| (score - maximum).exp())
+            .sum::<f64>()
+            .ln();
+    Some(BoardScoreSummary {
+        third_score: ranked[2],
+        fifth_score: ranked[4],
+        tenth_score: ranked[9],
+        mean,
+        standard_deviation: variance.sqrt(),
+        logsumexp,
+        nonnegative_count: ranked.iter().filter(|&&score| score >= 0.0).count(),
+        above_minus_one_count: ranked.iter().filter(|&&score| score >= -1.0).count(),
+    })
 }
 
 fn ratio(numerator: usize, denominator: usize) -> Result<f64, std::num::TryFromIntError> {
@@ -1358,13 +1418,34 @@ fn predicted_attributes(values: &[f64]) -> [usize; 4] {
 mod tests {
     use super::{
         BoardScores, average_board_scores, average_board_scores_four, average_board_scores_three,
-        average_logits, weighted_average_four, weighted_average_three,
+        average_logits, summarize_board_scores, weighted_average_four, weighted_average_three,
     };
 
     #[test]
     fn averages_logits_componentwise_without_rounding_shortcuts() {
         let averaged = average_logits(&[1.0, 3.0, -5.0], &[5.0, 7.0, 9.0], 0.5).ok();
         assert_eq!(averaged, Some(vec![3.0, 5.0, 2.0]));
+    }
+
+    #[test]
+    fn board_score_summary_uses_rank_distribution_and_stable_logsumexp() {
+        let scores = (0_u32..10).map(f64::from).collect::<Vec<_>>();
+        let summary = summarize_board_scores(&scores).unwrap_or_else(|| unreachable!());
+        assert_eq!(summary.third_score, 7.0);
+        assert_eq!(summary.fifth_score, 5.0);
+        assert_eq!(summary.tenth_score, 0.0);
+        assert!((summary.mean - 4.5).abs() < 1.0e-12);
+        assert!((summary.standard_deviation - 8.25_f64.sqrt()).abs() < 1.0e-12);
+        let expected_logsumexp = 9.0
+            + scores
+                .iter()
+                .map(|score| (score - 9.0).exp())
+                .sum::<f64>()
+                .ln();
+        assert!((summary.logsumexp - expected_logsumexp).abs() < 1.0e-12);
+        assert_eq!(summary.nonnegative_count, 10);
+        assert_eq!(summary.above_minus_one_count, 10);
+        assert!(summarize_board_scores(&scores[..9]).is_none());
     }
 
     #[test]

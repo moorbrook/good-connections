@@ -658,3 +658,15 @@ accuracy remained 96.2891% (97.6074% Has SET, 94.9707% No SET). Recalibrating
 the training loss at weight 3.0 declined to 95.9717%. Width is therefore
 rejected: the remaining bottleneck is the board-level action, not local visual
 capacity alone.
+
+**Board-summary head falsification.** The evaluator now records the expected
+board kind, whether the strongest triple is actually a SET, deeper score
+ranks, score mean and standard deviation, log-sum-exp, and threshold counts.
+A deterministic PEP 723 analysis split the 2,048 uniform-ensemble boards in
+half, fit only on the first 1,024, and evaluated on the disjoint second half.
+A logistic board head using the rich summaries improved held-out raw action
+accuracy from 97.4609% to 98.1445%; an eight-unit tanh MLP tied it at 98.1445%
+rather than improving further. Summary-level board heads are therefore useful
+but insufficient for the 99% goal. A future board head must consume richer
+per-triple typed-relation evidence instead of only statistics of final SET
+scores.

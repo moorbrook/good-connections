@@ -77,3 +77,9 @@ improved local attribute and relation metrics but tied the standard model at
 rejected. The next architecture experiment must give `NoSet` an explicit
 board-level learned output rather than deriving it solely from whether the
 largest of 220 independent triple logits crosses zero.
+
+A held-out board-head probe using rich statistics of all 220 final scores
+reached 98.1445%; a nonlinear eight-unit MLP did not exceed the linear probe.
+This narrows the next implementation: retain per-triple typed-relation evidence
+for a learned board-level reader, because final-score summary statistics have
+already discarded information needed to separate the remaining cases.
