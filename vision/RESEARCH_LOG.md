@@ -539,3 +539,21 @@ boards: 98.8525391% accuracy with 94 failures. Triple accuracy was
 v8 candidate, and it misses the v8 raw research gate by 13 failures. No guard
 or abstention altered a prediction, and the v8 sealed corpus remained
 evaluator-unopened.
+
+**Four v8 replicas trained.** The four RNG pairs were selected from the unused
+replica-seed list before v8 training began, although the exact values were not
+committed to this log until after training. Each run used the locked 688-atlas
+training corpus, 20,000 MPSGraph steps, batches of 64 triples, the same
+44,254-parameter research policy, and the predeclared fixed uniform ensemble:
+
+| Replica | Data seed | Initialization seed | Seconds | Checkpoint SHA-256 |
+| ---: | ---: | ---: | ---: | --- |
+| 1 | 99005 | 11400714819323198485 | 141.951 | `085071f86e53f422ba980eb1ee17f2436ef7db3ed31e8f96a7577d830bbfe900` |
+| 2 | 190001 | 6364136223846793005 | 140.883 | `3b27f0dc61b12d92f6261c2279c238a403856eb47025c5cbab22b8dd4e413ea8` |
+| 3 | 290003 | 1442695040888963407 | 141.310 | `101ab10e81103d7fcb9557c5d661346d6ad7cbaaa7e5f42f354081dfb4256312` |
+| 4 | 390007 | 3202034522624059733 | 142.281 | `6aeb7c7b39b6f1455285bc6812165ac51d797c308560fcc15b0e664d4d121e1c` |
+
+The first exported checkpoint passed a strict FrankenTorch state-dict load,
+forward-loss, and backward-gradient probe. The locked research evaluator also
+strict-loads all four checkpoints, so no permissive key adapter or alternate
+inference implementation enters the score.
