@@ -54,6 +54,28 @@ human-solvable capture, not an information-erasure test. A model that relies on
 a single uninterrupted stripe or symbol edge should reveal that dependency.
 Profiles are fixed per atlas, not chosen after seeing a model prediction.
 
+## Locked training corpus
+
+Directory: `vision-artifacts/board-v7-training-atlases`
+
+This corpus is training data only. It is never a validation input, must not be
+passed as `--validation-atlas-dir`, and has no evaluator result. It targets the
+current research diagnosis (shadow, crop, low-contrast, and gamut failures,
+especially in the nocturne theme) while keeping source seeds disjoint from the
+research and sealed corpora:
+
+- seeds `17001`–`17002`, all four themes, DPR 1 widths `97`, `211`, and `349`,
+  with all eleven profiles: 264 PNG atlases;
+- the same seeds and themes at true Chrome DPR 2, widths `121` and `251`,
+  with `clean`, `crop`, `shadow`, `tilt`, and `occlusion`: 80 PNG atlases;
+- **344 PNG atlases total**, 172 per seed.
+
+The chosen widths are absent from the board-v7 research/sealed matrices and
+from the board-v4/v5/v6 research matrices. The sorted per-file aggregate
+digest is locked in [`BOARD_V7_TRAINING.sha256`](BOARD_V7_TRAINING.sha256).
+Use this directory only as the training `--atlas-dir`; do not copy it into a
+validation or sealed artifact directory.
+
 ## Locked research corpus
 
 Directory: `vision-artifacts/board-v7-research-atlases`
@@ -172,18 +194,23 @@ From the repository root, render the two DPR-1 and DPR-2 portions separately
 because the DPR-2 matrix intentionally uses fewer profiles:
 
 ```sh
+training="vision-artifacts/board-v7-training-atlases"
 research="vision-artifacts/board-v7-research-atlases"
 sealed="vision-artifacts/board-v7-sealed-atlases"
 profiles='clean,blur,defocus,crop,shadow,lowcontrast,jpeg,tilt,occlusion,gamut,compound'
 dpr2_profiles='clean,crop,shadow,tilt,occlusion'
 
+tools/render-vision-atlases.sh "$training" 2 17001 all '97,211,349' "$profiles" 1
+tools/render-vision-atlases.sh "$training" 2 17001 all '121,251' "$dpr2_profiles" 2
 tools/render-vision-atlases.sh "$research" 3 15001 all '83,157,293' "$profiles" 1
 tools/render-vision-atlases.sh "$research" 3 15001 all '107,277' "$dpr2_profiles" 2
 tools/render-vision-atlases.sh "$sealed" 3 16001 all '83,157,293' "$profiles" 1
 tools/render-vision-atlases.sh "$sealed" 3 16001 all '107,277' "$dpr2_profiles" 2
 
+node tools/verify-vision-corpus.mjs "$training" 344
 node tools/verify-vision-corpus.mjs "$research" 516
 node tools/verify-vision-corpus.mjs "$sealed" 516
+tools/hash-vision-corpus.sh "$training"
 tools/hash-vision-corpus.sh "$research"
 tools/hash-vision-corpus.sh "$sealed"
 ```
