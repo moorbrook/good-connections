@@ -444,7 +444,12 @@ matrix with seeds 16001–16003 and digest
 `46c56adb4aa2e8aeb4e4ab55f59b02670a056c8c9232402de5b0d802bc8e7dc6`. Both corpora passed the locked
 filename, count, dimension, and visual checks; the sealed corpus was not passed to an evaluator.
 
-The raw selection run is fixed at 1,024 triple batches and 8,192 boards. Rank by raw board failures,
-then raw triple accuracy, then parameter count. Only a candidate at or above 99% research accuracy
-(at most 81 failures in 8,192 boards) may receive the one sealed 10,000-board evaluation. Do not fit
-or apply abstention during this cycle. Full protocol details are in `BOARD_V7_PROTOCOL.md`.
+The raw selection run is fixed at 1,024 triple batches and 8,192 boards, evaluated as three
+sequential 172-atlas shards so a 24 GB machine never loads the 516-atlas corpus at once. The locked
+shard allocations are 342/341/341 triple batches and 2,731/2,731/2,730 boards, with explicit triple
+and board seeds recorded in `BOARD_V7_PROTOCOL.md`; `tools/evaluate-board-v7-research-shards.sh`
+checks the corpus digest and aggregates exactly 65,536 triples and 8,192 boards. Rank by raw board
+failures, then raw triple accuracy, then parameter count. Only a candidate at or above 99% research
+accuracy (at most 81 failures in 8,192 boards) may receive the one sealed 10,000-board evaluation.
+Do not fit or apply abstention during this cycle. Full protocol details are in
+`BOARD_V7_PROTOCOL.md`.
