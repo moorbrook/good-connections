@@ -1,3 +1,4 @@
 phase	candidate	weights	checkpoints	learned_parameters	triple_correct	triple_total	board_failures	board_total	raw_board_accuracy	decision
 research	board-v7-frozen-winner-control	0.44/0.36/0.10/0.10	4	177016	64646	65536	94	8192	0.988525391	reject control; misses raw gate
 research	board-v8-uniform-four	0.25/0.25/0.25/0.25	4	177016	65211	65536	41	8192	0.994995117	selected research winner
+sealed	board-v8-uniform-four	0.25/0.25/0.25/0.25	4	177016	65372	65536	19	10000	0.998100000	passes 99% raw target; sealed retired

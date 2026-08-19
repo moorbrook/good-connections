@@ -567,3 +567,14 @@ run therefore becomes eligible. Before that run, sealed triple RNG seeds
 `317145488695021–023` were added to `BOARD_V8_PROTOCOL.md`; the board seeds,
 allocation, uniform weights, checkpoint hashes, and sealed corpus digest were
 already fixed. No abstention or confidence guard enters either score.
+
+**One-time sealed v8 result.** The frozen four-checkpoint winner received its
+single permitted evaluation on the disjoint seeds `19001–19003`. It produced
+19 failures in 10,000 raw boards: **99.8100000% accuracy at 100% coverage**.
+The three fixed shards contributed 6, 12, and 1 failures. Triple accuracy was
+65,372/65,536 (99.7497559%). This passes the 99% raw holdout goal by 81 boards.
+The checkpoint hashes, `0.25/0.25/0.25/0.25` weights, corpus digest, and RNG
+allocation all matched the pre-run lock. No abstention, confidence guard,
+rerun, coefficient change, or sealed-data tuning was used. Board-v8 sealed is
+now exposed and retired; this result is the final finite-distribution holdout
+measurement for the cycle.
