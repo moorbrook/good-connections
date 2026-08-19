@@ -227,6 +227,7 @@ impl PolicyGraph {
         typed_relations: bool,
         negative_logsumexp_loss_weight: f32,
         wide_vision: bool,
+        fill_loss_multiplier: f32,
     ) -> Self {
         let mut builder = Builder::new(init_seed);
         let shared_channels = if wide_vision {
@@ -315,7 +316,7 @@ impl PolicyGraph {
             &attributes,
             &[BATCH_SIZE * 3 * ATTRIBUTE_COUNT, ATTRIBUTE_VALUE_COUNT],
         );
-        let attribute_loss = unsafe {
+        let mut attribute_loss = unsafe {
             builder
                 .graph
                 .softMaxCrossEntropyWithSourceTensor_labelsTensor_axis_reductionType_name(
@@ -326,6 +327,62 @@ impl PolicyGraph {
                     None,
                 )
         };
+        if (fill_loss_multiplier - 1.0).abs() > f32::EPSILON {
+            let attribute_classes_by_kind = builder.reshape(
+                &attribute_classes,
+                &[CARD_COUNT, ATTRIBUTE_COUNT, ATTRIBUTE_VALUE_COUNT],
+            );
+            let attribute_labels_by_kind = builder.reshape(
+                &attribute_labels,
+                &[CARD_COUNT, ATTRIBUTE_COUNT, ATTRIBUTE_VALUE_COUNT],
+            );
+            let fill_classes = unsafe {
+                builder.graph.sliceTensor_dimension_start_length_name(
+                    &attribute_classes_by_kind,
+                    1,
+                    3,
+                    1,
+                    None,
+                )
+            };
+            let fill_classes = builder.reshape(&fill_classes, &[CARD_COUNT, ATTRIBUTE_VALUE_COUNT]);
+            let fill_labels = unsafe {
+                builder.graph.sliceTensor_dimension_start_length_name(
+                    &attribute_labels_by_kind,
+                    1,
+                    3,
+                    1,
+                    None,
+                )
+            };
+            let fill_labels = builder.reshape(&fill_labels, &[CARD_COUNT, ATTRIBUTE_VALUE_COUNT]);
+            let fill_loss = unsafe {
+                builder
+                    .graph
+                    .softMaxCrossEntropyWithSourceTensor_labelsTensor_axis_reductionType_name(
+                        &fill_classes,
+                        &fill_labels,
+                        1,
+                        MPSGraphLossReductionType::Mean,
+                        None,
+                    )
+            };
+            let denominator = 3.0 + fill_loss_multiplier;
+            let base_scale = unsafe {
+                builder
+                    .graph
+                    .constantWithScalar_dataType(f64::from(4.0 / denominator), MPSDataType::Float32)
+            };
+            let fill_scale = unsafe {
+                builder.graph.constantWithScalar_dataType(
+                    f64::from((fill_loss_multiplier - 1.0) / denominator),
+                    MPSDataType::Float32,
+                )
+            };
+            let scaled_base = builder.mul(&attribute_loss, &base_scale);
+            let scaled_fill = builder.mul(&fill_loss, &fill_scale);
+            attribute_loss = builder.add(&scaled_base, &scaled_fill);
+        }
 
         let probabilities = builder.reshape(
             &attributes,
@@ -475,12 +532,10 @@ impl PolicyGraph {
                     )
             };
             let weight = unsafe {
-                builder
-                    .graph
-                    .constantWithScalar_dataType(
-                        f64::from(negative_logsumexp_loss_weight),
-                        MPSDataType::Float32,
-                    )
+                builder.graph.constantWithScalar_dataType(
+                    f64::from(negative_logsumexp_loss_weight),
+                    MPSDataType::Float32,
+                )
             };
             let weighted_aggregate = builder.mul(&aggregate_loss, &weight);
             loss = builder.add(&loss, &weighted_aggregate);

@@ -80,6 +80,15 @@ largest of 220 independent triple logits crosses zero.
 
 A held-out board-head probe using rich statistics of all 220 final scores
 reached 98.1445%; a nonlinear eight-unit MLP did not exceed the linear probe.
-This narrows the next implementation: retain per-triple typed-relation evidence
-for a learned board-level reader, because final-score summary statistics have
-already discarded information needed to separate the remaining cases.
+The follow-up exported all per-triple typed-relation evidence. A local shared
+MLP reached 96.7285%, a differentiable multiple-instance reader reached
+97.1680%, and a rich pooled MLP overfit from 99.3652% training to 96.5332%
+held out. The current triple selector also caps a perfect board classifier at
+99.2188% on that split. These routes are rejected rather than integrated.
+
+Normalized fill-loss multipliers improved the bottleneck fill specialist from
+98.5026% to 98.7956% but reduced mixed raw accuracy; simple specialist
+reweighting is also rejected. The next architecture experiment must reason
+contextually across the twelve shared cards before triple scoring, allowing
+the model to reconcile a locally plausible attribute error with the rest of
+the board. This is a learned contextual reader, not a symbolic SET solver.

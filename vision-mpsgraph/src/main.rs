@@ -34,6 +34,7 @@ struct TrainConfig {
     data_seed: u64,
     init_seed: u64,
     typed_relations: bool,
+    fill_loss_multiplier: f32,
     negative_logsumexp_loss_weight: f32,
     board_correlated_negatives: bool,
     wide_vision: bool,
@@ -297,6 +298,7 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
         data_seed: DEFAULT_DATA_SEED,
         init_seed: DEFAULT_INIT_SEED,
         typed_relations: false,
+        fill_loss_multiplier: 1.0,
         negative_logsumexp_loss_weight: 0.0,
         board_correlated_negatives: false,
         wide_vision: false,
@@ -322,6 +324,12 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
             }
             "--no-augment" => config.augment = false,
             "--typed-relations" => config.typed_relations = true,
+            "--fill-loss-multiplier" => {
+                config.fill_loss_multiplier = arguments
+                    .next()
+                    .ok_or("--fill-loss-multiplier requires a value")?
+                    .parse::<f32>()?;
+            }
             "--board-correlated-negatives" => config.board_correlated_negatives = true,
             "--wide-vision" => config.wide_vision = true,
             "--negative-logsumexp-loss-weight" => {
@@ -344,7 +352,7 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
             }
             unknown => {
                 return Err(format!(
-                    "unknown argument {unknown}; usage: [--steps N] [--output PATH] [--atlas-dir PATH] [--no-augment] [--typed-relations] [--negative-logsumexp-loss-weight W] [--board-correlated-negatives] [--wide-vision] [--data-seed N] [--init-seed N]"
+                    "unknown argument {unknown}; usage: [--steps N] [--output PATH] [--atlas-dir PATH] [--no-augment] [--typed-relations] [--fill-loss-multiplier M] [--negative-logsumexp-loss-weight W] [--board-correlated-negatives] [--wide-vision] [--data-seed N] [--init-seed N]"
                 )
                 .into());
             }
@@ -352,6 +360,9 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
     }
     if config.steps == 0 {
         return Err("steps must be positive".into());
+    }
+    if !config.fill_loss_multiplier.is_finite() || config.fill_loss_multiplier <= 0.0 {
+        return Err("fill-loss multiplier must be finite and positive".into());
     }
     if !config.negative_logsumexp_loss_weight.is_finite()
         || config.negative_logsumexp_loss_weight < 0.0
@@ -498,8 +509,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         config.typed_relations,
         config.negative_logsumexp_loss_weight,
         config.wide_vision,
+        config.fill_loss_multiplier,
     );
     println!("typed_relations: {}", config.typed_relations);
+    println!("fill_loss_multiplier: {}", config.fill_loss_multiplier);
     println!(
         "negative_logsumexp_loss_weight: {}",
         config.negative_logsumexp_loss_weight
@@ -558,11 +571,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 config.augment,
             )
         } else if config.negative_logsumexp_loss_weight > 0.0 {
-            atlases.make_grouped_training_batch(
-                &mut rng,
-                policy_graph::BATCH_SIZE,
-                config.augment,
-            )
+            atlases.make_grouped_training_batch(&mut rng, policy_graph::BATCH_SIZE, config.augment)
         } else {
             atlases.make_training_batch(&mut rng, policy_graph::BATCH_SIZE, config.augment)
         };

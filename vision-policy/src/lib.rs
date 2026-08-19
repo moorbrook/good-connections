@@ -26,6 +26,11 @@ pub struct BoardScores {
     pub triples: Vec<[usize; 3]>,
     pub scores: Vec<f64>,
     pub attribute_logits: Vec<f64>,
+    /// Per-triple, per-attribute relation logits in triple-major order.
+    /// Typed policies emit three classes (`same`, `different`, `invalid`);
+    /// legacy policies emit one untyped relation logit.
+    pub relation_logits: Vec<f64>,
+    pub relation_class_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -541,12 +546,14 @@ impl<H: Module, const RELATION_CLASSES: usize, const SHARED_CHANNELS: usize>
             vec![triple_count, 3, ATTRIBUTE_COUNT, ATTRIBUTE_VALUE_COUNT],
             false,
         )?;
-        let (scores, _) =
+        let (scores, relation_logits) =
             self.forward_relation_with_types(session, relation_input, triple_count)?;
         Ok(BoardScores {
             triples,
             scores: session.tensor_values(scores)?,
             attribute_logits: attribute_logit_values,
+            relation_logits: session.tensor_values(relation_logits)?,
+            relation_class_count: RELATION_CLASSES,
         })
     }
 }
@@ -884,6 +891,8 @@ mod tests {
             triples: vec![[0, 1, 2], [0, 1, 3]],
             scores: vec![2.5, 1.75],
             attribute_logits: (0..4).flat_map(|_| [8.0, -4.0, -4.0].repeat(4)).collect(),
+            relation_logits: Vec::new(),
+            relation_class_count: 0,
         };
         let decision = scores.best_decision().unwrap_or_else(|| unreachable!());
         assert_eq!(decision.triple, [0, 1, 2]);
@@ -899,6 +908,8 @@ mod tests {
             triples: vec![[0, 1, 2], [0, 1, 3]],
             scores: vec![-0.25, -0.75],
             attribute_logits: attributes.collect(),
+            relation_logits: Vec::new(),
+            relation_class_count: 0,
         };
         assert_eq!(
             no_set_scores
@@ -911,6 +922,8 @@ mod tests {
             triples: no_set_scores.triples,
             scores: vec![0.25, -0.75],
             attribute_logits: no_set_scores.attribute_logits,
+            relation_logits: no_set_scores.relation_logits,
+            relation_class_count: no_set_scores.relation_class_count,
         };
         assert_eq!(
             set_scores

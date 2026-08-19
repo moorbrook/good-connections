@@ -34,6 +34,36 @@ fn add_negative_logsumexp_loss(
     session.tensor_add(loss, weighted_aggregate)
 }
 
+fn attribute_loss_with_fill_multiplier(
+    session: &mut FrankenTorchSession,
+    attribute_logits: ft_autograd::TensorNodeId,
+    attribute_targets: ft_autograd::TensorNodeId,
+    card_instances: usize,
+    fill_multiplier: f64,
+) -> Result<ft_autograd::TensorNodeId, ft_autograd::AutogradError> {
+    let base_loss = CrossEntropyLoss.forward(session, attribute_logits, attribute_targets)?;
+    if (fill_multiplier - 1.0).abs() < f64::EPSILON {
+        return Ok(base_loss);
+    }
+    let logits = session.tensor_reshape(
+        attribute_logits,
+        vec![card_instances, set_vision_policy::ATTRIBUTE_COUNT, 3],
+    )?;
+    let fill_logits = session.tensor_narrow(logits, 1, 3, 1)?;
+    let fill_logits = session.tensor_reshape(fill_logits, vec![card_instances, 3])?;
+    let targets = session.tensor_reshape(
+        attribute_targets,
+        vec![card_instances, set_vision_policy::ATTRIBUTE_COUNT],
+    )?;
+    let fill_targets = session.tensor_narrow(targets, 1, 3, 1)?;
+    let fill_targets = session.tensor_reshape(fill_targets, vec![card_instances])?;
+    let fill_loss = CrossEntropyLoss.forward(session, fill_logits, fill_targets)?;
+    let denominator = 3.0 + fill_multiplier;
+    let base_loss = session.tensor_mul_scalar(base_loss, 4.0 / denominator)?;
+    let fill_loss = session.tensor_mul_scalar(fill_loss, (fill_multiplier - 1.0) / denominator)?;
+    session.tensor_add(base_loss, fill_loss)
+}
+
 #[derive(Debug)]
 enum ResearchPolicyVariant {
     Legacy(ResearchVisualSetPolicy),
@@ -287,8 +317,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let outputs = model.forward_with_relations(&mut session, input)?;
         let attribute_logits = session.tensor_reshape(outputs.attributes, vec![64 * 3 * 4, 3])?;
         let set_loss = BCEWithLogitsLoss.forward(&mut session, outputs.set, set_targets)?;
-        let attribute_loss =
-            CrossEntropyLoss.forward(&mut session, attribute_logits, attribute_targets)?;
+        let attribute_loss = attribute_loss_with_fill_multiplier(
+            &mut session,
+            attribute_logits,
+            attribute_targets,
+            64 * 3,
+            config.fill_loss_multiplier,
+        )?;
         let attribute_loss =
             session.tensor_mul_scalar(attribute_loss, config.attribute_loss_weight)?;
         let mut loss = session.tensor_add(set_loss, attribute_loss)?;
@@ -366,8 +401,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let attribute_logits =
                 session.tensor_reshape(outputs.attributes, vec![config.batch_size * 3 * 4, 3])?;
             let set_loss = BCEWithLogitsLoss.forward(&mut session, outputs.set, set_targets)?;
-            let attribute_loss =
-                CrossEntropyLoss.forward(&mut session, attribute_logits, attribute_targets)?;
+            let attribute_loss = attribute_loss_with_fill_multiplier(
+                &mut session,
+                attribute_logits,
+                attribute_targets,
+                config.batch_size * 3,
+                config.fill_loss_multiplier,
+            )?;
             let attribute_loss =
                 session.tensor_mul_scalar(attribute_loss, config.attribute_loss_weight)?;
             let mut loss = session.tensor_add(set_loss, attribute_loss)?;
@@ -462,6 +502,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let abstention_path = config.output_dir.join("abstention-samples.tsv");
     write_abstention_samples(&abstention_path, &evaluation.abstention_samples)?;
     println!("abstention_samples: {}", abstention_path.display());
+    if config.export_board_evidence {
+        let evidence_path = config.output_dir.join("board-relation-evidence.tsv");
+        write_board_relation_evidence(&evidence_path, &evaluation.abstention_samples)?;
+        println!("board_relation_evidence: {}", evidence_path.display());
+    }
     if !config.eval_only {
         let state = model.state_dict(&session)?;
         let checkpoint = config.output_dir.join("set-vision.ftsv");
@@ -520,6 +565,11 @@ struct AbstentionSample {
     action: RawBoardAction,
     decision: BoardDecision,
     score_summary: BoardScoreSummary,
+    triple_scores: Vec<f64>,
+    relation_logits: Vec<f64>,
+    relation_class_count: usize,
+    triple_targets: Vec<f64>,
+    attribute_logits: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -871,6 +921,11 @@ fn evaluate(
             action,
             decision,
             score_summary,
+            triple_scores: output.scores.clone(),
+            relation_logits: output.relation_logits.clone(),
+            relation_class_count: output.relation_class_count,
+            triple_targets: board.set_targets.clone(),
+            attribute_logits: output.attribute_logits.clone(),
         });
         if !correct {
             let best_valid = output
@@ -1113,7 +1168,8 @@ fn average_board_scores(
     second: &BoardScores,
     primary_weight: f64,
 ) -> Result<BoardScores, std::io::Error> {
-    if first.triples != second.triples {
+    if first.triples != second.triples || first.relation_class_count != second.relation_class_count
+    {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "ensemble triple ordering mismatch",
@@ -1127,6 +1183,12 @@ fn average_board_scores(
             &second.attribute_logits,
             primary_weight,
         )?,
+        relation_logits: average_logits(
+            &first.relation_logits,
+            &second.relation_logits,
+            primary_weight,
+        )?,
+        relation_class_count: first.relation_class_count,
     })
 }
 
@@ -1174,7 +1236,11 @@ fn average_board_scores_three(
     third: &BoardScores,
     weights: [f64; 3],
 ) -> Result<BoardScores, std::io::Error> {
-    if first.triples != second.triples || first.triples != third.triples {
+    if first.triples != second.triples
+        || first.triples != third.triples
+        || first.relation_class_count != second.relation_class_count
+        || first.relation_class_count != third.relation_class_count
+    {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "three-model ensemble triple ordering mismatch",
@@ -1189,6 +1255,13 @@ fn average_board_scores_three(
             &third.attribute_logits,
             weights,
         )?,
+        relation_logits: weighted_average_three(
+            &first.relation_logits,
+            &second.relation_logits,
+            &third.relation_logits,
+            weights,
+        )?,
+        relation_class_count: first.relation_class_count,
     })
 }
 
@@ -1242,6 +1315,9 @@ fn average_board_scores_four(
     if first.triples != second.triples
         || first.triples != third.triples
         || first.triples != fourth.triples
+        || first.relation_class_count != second.relation_class_count
+        || first.relation_class_count != third.relation_class_count
+        || first.relation_class_count != fourth.relation_class_count
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -1264,6 +1340,14 @@ fn average_board_scores_four(
             &fourth.attribute_logits,
             weights,
         )?,
+        relation_logits: weighted_average_four(
+            &first.relation_logits,
+            &second.relation_logits,
+            &third.relation_logits,
+            &fourth.relation_logits,
+            weights,
+        )?,
+        relation_class_count: first.relation_class_count,
     })
 }
 
@@ -1351,6 +1435,48 @@ fn write_abstention_samples(
         )?;
     }
     writer.flush()?;
+    Ok(())
+}
+
+fn write_board_relation_evidence(
+    path: &std::path::Path,
+    samples: &[AbstentionSample],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let file = std::fs::File::create(path)?;
+    let mut writer = std::io::BufWriter::new(file);
+    writeln!(
+        writer,
+        "atlas\texpected_kind\tstrongest_is_set\trelation_class_count\ttriple_scores\trelation_logits\ttriple_targets\tattribute_logits"
+    )?;
+    for sample in samples {
+        write!(
+            writer,
+            "{}\t{:?}\t{}\t{}\t",
+            sample.atlas,
+            sample.expected_kind,
+            u8::from(sample.strongest_is_set),
+            sample.relation_class_count,
+        )?;
+        write_f64_list(&mut writer, &sample.triple_scores)?;
+        write!(writer, "\t")?;
+        write_f64_list(&mut writer, &sample.relation_logits)?;
+        write!(writer, "\t")?;
+        write_f64_list(&mut writer, &sample.triple_targets)?;
+        write!(writer, "\t")?;
+        write_f64_list(&mut writer, &sample.attribute_logits)?;
+        writeln!(writer)?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_f64_list(writer: &mut impl Write, values: &[f64]) -> Result<(), std::io::Error> {
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            write!(writer, ",")?;
+        }
+        write!(writer, "{value:.12}")?;
+    }
     Ok(())
 }
 
@@ -1480,11 +1606,15 @@ mod tests {
             triples: vec![[0, 1, 2]],
             scores: vec![1.0, 3.0],
             attribute_logits: vec![1.0, 3.0, 5.0],
+            relation_logits: vec![2.0, 4.0],
+            relation_class_count: 1,
         };
         let second = BoardScores {
             triples: first.triples.clone(),
             scores: vec![5.0, 7.0],
             attribute_logits: vec![5.0, 7.0, 9.0],
+            relation_logits: vec![6.0, 8.0],
+            relation_class_count: 1,
         };
         let averaged = average_board_scores(&first, &second, 0.5).ok();
         assert_eq!(
@@ -1492,8 +1622,14 @@ mod tests {
             Some(vec![3.0, 5.0])
         );
         assert_eq!(
-            averaged.map(|scores| scores.attribute_logits),
+            averaged
+                .as_ref()
+                .map(|scores| scores.attribute_logits.clone()),
             Some(vec![3.0, 5.0, 7.0])
+        );
+        assert_eq!(
+            averaged.map(|scores| scores.relation_logits),
+            Some(vec![4.0, 6.0])
         );
     }
 
@@ -1503,11 +1639,15 @@ mod tests {
             triples: vec![[0, 1, 2], [0, 1, 3]],
             scores: vec![1.0, 2.0],
             attribute_logits: vec![1.0, 2.0, 3.0],
+            relation_logits: vec![1.0, 2.0],
+            relation_class_count: 1,
         };
         let second = BoardScores {
             triples: vec![[0, 1, 3], [0, 1, 2]],
             scores: vec![3.0, 4.0],
             attribute_logits: vec![4.0, 5.0, 6.0],
+            relation_logits: vec![3.0, 4.0],
+            relation_class_count: 1,
         };
         assert!(average_board_scores(&first, &second, 0.5).is_err());
 
@@ -1515,6 +1655,8 @@ mod tests {
             triples: first.triples.clone(),
             scores: vec![3.0],
             attribute_logits: first.attribute_logits.clone(),
+            relation_logits: first.relation_logits.clone(),
+            relation_class_count: first.relation_class_count,
         };
         assert!(average_board_scores(&first, &second, 0.5).is_err());
     }
@@ -1525,11 +1667,15 @@ mod tests {
             triples: vec![[0, 1, 2]],
             scores: vec![f64::NAN],
             attribute_logits: vec![1.0],
+            relation_logits: vec![1.0],
+            relation_class_count: 1,
         };
         let second = BoardScores {
             triples: first.triples.clone(),
             scores: vec![1.0],
             attribute_logits: first.attribute_logits.clone(),
+            relation_logits: first.relation_logits.clone(),
+            relation_class_count: first.relation_class_count,
         };
         assert!(average_board_scores(&first, &second, 0.5).is_err());
     }
@@ -1540,16 +1686,22 @@ mod tests {
             triples: vec![[0, 1, 2]],
             scores: vec![1.0, 3.0],
             attribute_logits: vec![1.0, 3.0, 5.0],
+            relation_logits: vec![2.0, 4.0],
+            relation_class_count: 1,
         };
         let second = BoardScores {
             triples: first.triples.clone(),
             scores: vec![3.0, 5.0],
             attribute_logits: vec![3.0, 5.0, 7.0],
+            relation_logits: vec![4.0, 6.0],
+            relation_class_count: 1,
         };
         let third = BoardScores {
             triples: first.triples.clone(),
             scores: vec![5.0, 7.0],
             attribute_logits: vec![5.0, 7.0, 9.0],
+            relation_logits: vec![6.0, 8.0],
+            relation_class_count: 1,
         };
         let averaged = average_board_scores_three(&first, &second, &third, [0.25, 0.25, 0.5]).ok();
         assert_eq!(
@@ -1557,8 +1709,14 @@ mod tests {
             Some(vec![3.5, 5.5])
         );
         assert_eq!(
-            averaged.map(|scores| scores.attribute_logits),
+            averaged
+                .as_ref()
+                .map(|scores| scores.attribute_logits.clone()),
             Some(vec![3.5, 5.5, 7.5])
+        );
+        assert_eq!(
+            averaged.map(|scores| scores.relation_logits),
+            Some(vec![4.5, 6.5])
         );
     }
 
@@ -1568,21 +1726,29 @@ mod tests {
             triples: vec![[0, 1, 2]],
             scores: vec![1.0, 3.0],
             attribute_logits: vec![1.0, 3.0, 5.0],
+            relation_logits: vec![2.0, 4.0],
+            relation_class_count: 1,
         };
         let second = BoardScores {
             triples: first.triples.clone(),
             scores: vec![3.0, 5.0],
             attribute_logits: vec![3.0, 5.0, 7.0],
+            relation_logits: vec![4.0, 6.0],
+            relation_class_count: 1,
         };
         let third = BoardScores {
             triples: first.triples.clone(),
             scores: vec![5.0, 7.0],
             attribute_logits: vec![5.0, 7.0, 9.0],
+            relation_logits: vec![6.0, 8.0],
+            relation_class_count: 1,
         };
         let fourth = BoardScores {
             triples: first.triples.clone(),
             scores: vec![7.0, 9.0],
             attribute_logits: vec![7.0, 9.0, 11.0],
+            relation_logits: vec![8.0, 10.0],
+            relation_class_count: 1,
         };
         let averaged =
             average_board_scores_four(&first, &second, &third, &fourth, [0.1, 0.2, 0.3, 0.4]).ok();
@@ -1591,8 +1757,14 @@ mod tests {
             Some(vec![5.0, 7.0])
         );
         assert_eq!(
-            averaged.map(|scores| scores.attribute_logits),
+            averaged
+                .as_ref()
+                .map(|scores| scores.attribute_logits.clone()),
             Some(vec![5.0, 7.0, 9.0])
+        );
+        assert_eq!(
+            averaged.map(|scores| scores.relation_logits),
+            Some(vec![6.0, 8.0])
         );
     }
 

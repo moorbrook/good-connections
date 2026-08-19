@@ -670,3 +670,45 @@ rather than improving further. Summary-level board heads are therefore useful
 but insufficient for the 99% goal. A future board head must consume richer
 per-triple typed-relation evidence instead of only statistics of final SET
 scores.
+
+**Per-triple reader falsification.** Board evaluation can explicitly export
+all 220 final scores, all 2,640 typed-relation logits, every triple target, and
+the card attribute logits with `--export-board-evidence`; normal evaluations
+do not pay the large artifact cost. `analyze_relation_reader.py` is a deterministic
+PEP 723/NumPy probe; the first half of a 4,096-board stream is its training
+split and the second half remains untouched. A shared triple MLP over the
+existing score plus twelve relation probabilities reached only 96.7285% on
+the held-out raw action. Giving the reader an explicit multiple-instance
+board loss through differentiable log-mean-exp pooling peaked at 97.1680%.
+A richer pooled board MLP reached 99.3652% on its training half but collapsed
+to 96.5332% held out, so it is overfit and rejected. On the same test half,
+even a perfect board-kind reader paired with the existing triple selector is
+capped at 99.2188%; board classification alone has too little margin.
+
+A score blend between the uniform four-model ensemble and the wide model was
+also rejected. Selecting its coefficient and threshold on the training half
+yielded 97.2656% on the held-out half. The richer relation evidence and model
+diversity are therefore real but do not resolve the contextual card errors.
+
+**Fill-loss search.** Fill is the dominant local error: the standard uniform
+ensemble measured 98.5677% fill accuracy while count and colour were perfect
+and shape was 99.9023%. Both native and MPSGraph trainers now expose a
+normalized fill-loss multiplier. At multiplier 4, a one-step parity checkpoint
+produced loss `6.323562` in MPSGraph and `6.323562224` in FrankenTorch with
+matching shared gradients. The first exploratory run accidentally used the
+MPSGraph default seeds and is explicitly excluded from comparison. Controlled
+10,000-step runs reused baseline data seed `590011` and initialization seed
+`3935559000370003845`:
+
+| Fill multiplier | Fill accuracy | Mixed | Has SET | No SET |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 (baseline) | 98.5026% | **96.2891%** | 95.9961% | 96.5820% |
+| 2 | 98.6328% | 96.0938% | 95.8008% | 96.3867% |
+| 4 | **98.7956%** | 95.9961% | 96.1914% | 95.8008% |
+
+Extra fill supervision improves the intended specialist but not the raw board
+action, and the multiplier-4 checkpoint does not improve the uniform ensemble
+when blended. This falsifies simple specialist loss reweighting. The next
+model-search direction is a contextual card reader that can reconcile the
+twelve shared card predictions before action scoring; isolated triple readers
+cannot correct a visually plausible but globally inconsistent card error.

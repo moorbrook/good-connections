@@ -19,6 +19,7 @@ pub(crate) struct TrainConfig {
     pub(crate) batch_size: usize,
     pub(crate) learning_rate: f64,
     pub(crate) attribute_loss_weight: f64,
+    pub(crate) fill_loss_multiplier: f64,
     pub(crate) relation_loss_weight: f64,
     pub(crate) negative_logsumexp_loss_weight: f64,
     pub(crate) seed: u64,
@@ -30,6 +31,7 @@ pub(crate) struct TrainConfig {
     pub(crate) board_seed: u64,
     pub(crate) augment: bool,
     pub(crate) typed_relations: bool,
+    pub(crate) export_board_evidence: bool,
     pub(crate) mixed_boards: bool,
     pub(crate) board_correlated_negatives: bool,
     pub(crate) wide_vision: bool,
@@ -55,6 +57,7 @@ impl Default for TrainConfig {
             batch_size: 64,
             learning_rate: 8.0e-4,
             attribute_loss_weight: 0.35,
+            fill_loss_multiplier: 1.0,
             relation_loss_weight: 1.0,
             negative_logsumexp_loss_weight: 0.0,
             seed: 0x5e7_2026,
@@ -66,6 +69,7 @@ impl Default for TrainConfig {
             board_seed: DEFAULT_BOARD_SEED,
             augment: true,
             typed_relations: false,
+            export_board_evidence: false,
             mixed_boards: false,
             board_correlated_negatives: false,
             wide_vision: false,
@@ -90,6 +94,9 @@ impl TrainConfig {
                 "--attribute-loss-weight" => {
                     config.attribute_loss_weight = parse_value(&mut args, &flag)?;
                 }
+                "--fill-loss-multiplier" => {
+                    config.fill_loss_multiplier = parse_value(&mut args, &flag)?;
+                }
                 "--relation-loss-weight" => {
                     config.relation_loss_weight = parse_value(&mut args, &flag)?;
                 }
@@ -105,6 +112,7 @@ impl TrainConfig {
                 "--board-seed" => config.board_seed = parse_value(&mut args, &flag)?,
                 "--no-augment" => config.augment = false,
                 "--typed-relations" => config.typed_relations = true,
+                "--export-board-evidence" => config.export_board_evidence = true,
                 "--mixed-boards" => config.mixed_boards = true,
                 "--board-correlated-negatives" => config.board_correlated_negatives = true,
                 "--wide-vision" => config.wide_vision = true,
@@ -146,38 +154,51 @@ impl TrainConfig {
                 unknown => return Err(format!("unknown argument: {unknown}")),
             }
         }
-        if config.steps == 0
-            || config.batch_size == 0
-            || config.eval_batches == 0
-            || config.eval_boards == 0
+        config.validate_training_options()?;
+        config.validate_ensemble_options()?;
+        Ok(Some(config))
+    }
+
+    fn validate_training_options(&self) -> Result<(), String> {
+        if self.steps == 0
+            || self.batch_size == 0
+            || self.eval_batches == 0
+            || self.eval_boards == 0
         {
             return Err("step, batch, and evaluation counts must be positive".to_string());
         }
-        if config.learning_rate <= 0.0
-            || config.attribute_loss_weight < 0.0
-            || config.relation_loss_weight < 0.0
-            || !config.negative_logsumexp_loss_weight.is_finite()
-            || config.negative_logsumexp_loss_weight < 0.0
+        if self.learning_rate <= 0.0
+            || self.attribute_loss_weight < 0.0
+            || !self.fill_loss_multiplier.is_finite()
+            || self.fill_loss_multiplier <= 0.0
+            || self.relation_loss_weight < 0.0
+            || !self.negative_logsumexp_loss_weight.is_finite()
+            || self.negative_logsumexp_loss_weight < 0.0
         {
-            return Err("learning rate must be positive and loss weights non-negative".to_string());
+            return Err(
+                "learning rate and fill multiplier must be positive; loss weights must be non-negative"
+                    .to_string(),
+            );
         }
-        if config.negative_logsumexp_loss_weight > 0.0 && !config.typed_relations {
+        if self.negative_logsumexp_loss_weight > 0.0 && !self.typed_relations {
             return Err("--negative-logsumexp-loss-weight requires --typed-relations".to_string());
         }
-        if config.negative_logsumexp_loss_weight > 0.0 && config.batch_size % 2 != 0 {
+        if self.negative_logsumexp_loss_weight > 0.0 && !self.batch_size.is_multiple_of(2) {
             return Err("--negative-logsumexp-loss-weight requires an even batch size".to_string());
         }
-        if config.board_correlated_negatives && config.negative_logsumexp_loss_weight == 0.0 {
+        if self.board_correlated_negatives && self.negative_logsumexp_loss_weight == 0.0 {
             return Err(
                 "--board-correlated-negatives requires --negative-logsumexp-loss-weight"
                     .to_string(),
             );
         }
-        if config.wide_vision && !config.typed_relations {
+        if self.wide_vision && !self.typed_relations {
             return Err("--wide-vision requires --typed-relations".to_string());
         }
-        config.validate_ensemble_options()?;
-        Ok(Some(config))
+        if self.export_board_evidence && !self.typed_relations {
+            return Err("--export-board-evidence requires --typed-relations".to_string());
+        }
+        Ok(())
     }
 
     fn validate_ensemble_options(&mut self) -> Result<(), String> {
@@ -272,8 +293,10 @@ impl TrainConfig {
     pub(crate) fn usage() -> &'static str {
         "Usage: cargo run --release -- [--steps N] [--batch-size N] \
          [--learning-rate RATE] [--attribute-loss-weight WEIGHT] [--seed N] [--atlas-dir PATH] \
+         [--fill-loss-multiplier MULTIPLIER] \
          [--relation-loss-weight WEIGHT] [--negative-logsumexp-loss-weight WEIGHT] \
          [--typed-relations] [--mixed-boards] [--board-correlated-negatives] [--wide-vision] \
+         [--export-board-evidence] \
          [--validation-atlas-dir PATH] [--output-dir PATH] [--eval-only] \
          [--ensemble-output-dir PATH] \
          [--ensemble-third-output-dir PATH] \
@@ -372,8 +395,11 @@ mod tests {
         let args = [
             "--typed-relations",
             "--mixed-boards",
+            "--export-board-evidence",
             "--relation-loss-weight",
             "1.5",
+            "--fill-loss-multiplier",
+            "3.0",
             "--negative-logsumexp-loss-weight",
             "2.0",
             "--board-correlated-negatives",
@@ -387,7 +413,9 @@ mod tests {
             .unwrap_or_default();
         assert!(config.typed_relations);
         assert!(config.mixed_boards);
+        assert!(config.export_board_evidence);
         assert!((config.relation_loss_weight - 1.5).abs() < f64::EPSILON);
+        assert!((config.fill_loss_multiplier - 3.0).abs() < f64::EPSILON);
         assert!((config.negative_logsumexp_loss_weight - 2.0).abs() < f64::EPSILON);
         assert!(config.board_correlated_negatives);
         assert!(config.wide_vision);
@@ -418,6 +446,14 @@ mod tests {
 
         let untyped_wide = ["--wide-vision"].into_iter().map(str::to_string);
         assert!(TrainConfig::from_iter(untyped_wide).is_err());
+
+        let untyped_export = ["--export-board-evidence"].into_iter().map(str::to_string);
+        assert!(TrainConfig::from_iter(untyped_export).is_err());
+
+        let invalid_fill = ["--fill-loss-multiplier", "0"]
+            .into_iter()
+            .map(str::to_string);
+        assert!(TrainConfig::from_iter(invalid_fill).is_err());
     }
 
     #[test]
