@@ -1,9 +1,10 @@
-# Board-v7 raw two-checkpoint ensemble evaluator
+# Board-v7 raw multi-checkpoint ensemble evaluator
 
-The native `vision` evaluator has an optional, evaluation-only two-checkpoint
-mode for measuring whether two independently trained instances of the existing
-specialist-dilated-residual policy complement one another. It does not change
-the policy topology, browser checkpoint, or default single-checkpoint path.
+The native `vision` evaluator has optional, evaluation-only two- and
+three-checkpoint modes for measuring whether independently trained instances
+of the existing specialist-dilated-residual policy complement one another. It
+does not change the policy topology, browser checkpoint, or default
+single-checkpoint path.
 
 Run it with two checkpoint directories:
 
@@ -27,6 +28,20 @@ evaluator computes `W * primary + (1 - W) * secondary` for every set logit,
 board score, and attribute logit. The `0.5` path retains the existing midpoint
 operation exactly.
 
+To evaluate three checkpoints, add a third directory and three positive
+weights. The evaluator normalizes the supplied weights to sum to one:
+
+```sh
+  --ensemble-third-output-dir vision-artifacts/candidate-c \
+  --ensemble-weights 2 3 5
+```
+
+The three-model path computes `W1 * primary + W2 * secondary + W3 * third` for
+every set logit, board score, and attribute logit. `--ensemble-weights` is
+required with the third checkpoint and cannot be combined with the two-model
+`--ensemble-primary-weight` flag. A third checkpoint without the second, or
+weights supplied without a third checkpoint, is rejected.
+
 Each checkpoint is loaded into its own strict FrankenTorch session. For the
 triple metrics, the evaluator averages corresponding set logits and attribute
 logits. For board metrics, it averages corresponding learned triple scores and
@@ -36,11 +51,12 @@ solver, voting tie-break, or sealed-corpus access. It rejects missing or
 incompatible output, mismatched triple ordering or logit lengths, and
 non-finite logits.
 
-`--ensemble-output-dir` is rejected during training and probe-only runs. An
-invocation without the flag retains the existing single-model evaluator and
-its default behavior.
+The ensemble flags are rejected during training and probe-only runs. An
+invocation without `--ensemble-output-dir` retains the existing single-model
+evaluator and its default behavior; an invocation with only the second
+checkpoint retains the existing two-model behavior.
 
 This branch adds evaluator and parser tests only; it intentionally does not
 run board-v7 research or sealed evaluation. Record any future measurement in
-the board-v7 research log with both checkpoint hashes and the exact raw
-evaluation allocation.
+the board-v7 research log with all checkpoint hashes, normalized weights, and
+the exact raw evaluation allocation.

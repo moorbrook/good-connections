@@ -9,8 +9,10 @@ pub(crate) struct TrainConfig {
     pub(crate) validation_atlas_dir: PathBuf,
     pub(crate) output_dir: PathBuf,
     pub(crate) ensemble_output_dir: Option<PathBuf>,
+    pub(crate) ensemble_third_output_dir: Option<PathBuf>,
     pub(crate) ensemble_primary_weight: f64,
     ensemble_primary_weight_explicit: bool,
+    pub(crate) ensemble_weights: Option<[f64; 3]>,
     pub(crate) steps: usize,
     pub(crate) batch_size: usize,
     pub(crate) learning_rate: f64,
@@ -35,8 +37,10 @@ impl Default for TrainConfig {
             validation_atlas_dir: root.join("vision-artifacts/validation-atlases"),
             output_dir: root.join("vision-artifacts/model"),
             ensemble_output_dir: None,
+            ensemble_third_output_dir: None,
             ensemble_primary_weight: 0.5,
             ensemble_primary_weight_explicit: false,
+            ensemble_weights: None,
             steps: 10_000,
             batch_size: 64,
             learning_rate: 8.0e-4,
@@ -86,9 +90,20 @@ impl TrainConfig {
                 "--ensemble-output-dir" => {
                     config.ensemble_output_dir = Some(PathBuf::from(next_value(&mut args, &flag)?));
                 }
+                "--ensemble-third-output-dir" => {
+                    config.ensemble_third_output_dir =
+                        Some(PathBuf::from(next_value(&mut args, &flag)?));
+                }
                 "--ensemble-primary-weight" => {
                     config.ensemble_primary_weight = parse_value(&mut args, &flag)?;
                     config.ensemble_primary_weight_explicit = true;
+                }
+                "--ensemble-weights" => {
+                    config.ensemble_weights = Some([
+                        parse_value(&mut args, &flag)?,
+                        parse_value(&mut args, &flag)?,
+                        parse_value(&mut args, &flag)?,
+                    ]);
                 }
                 unknown => return Err(format!("unknown argument: {unknown}")),
             }
@@ -103,29 +118,58 @@ impl TrainConfig {
         if config.learning_rate <= 0.0 || config.attribute_loss_weight < 0.0 {
             return Err("learning rate must be positive and loss weights non-negative".to_string());
         }
-        if !(config.ensemble_primary_weight.is_finite()
-            && 0.0 < config.ensemble_primary_weight
-            && config.ensemble_primary_weight < 1.0)
+        config.validate_ensemble_options()?;
+        Ok(Some(config))
+    }
+
+    fn validate_ensemble_options(&mut self) -> Result<(), String> {
+        if !(self.ensemble_primary_weight.is_finite()
+            && 0.0 < self.ensemble_primary_weight
+            && self.ensemble_primary_weight < 1.0)
         {
             return Err(
                 "ensemble primary weight must be finite and strictly between 0 and 1".to_string(),
             );
         }
-        if config.ensemble_output_dir.is_some() && (!config.eval_only || config.probe_only) {
+        if self.ensemble_output_dir.is_some() && (!self.eval_only || self.probe_only) {
             return Err(
                 "--ensemble-output-dir requires --eval-only and is unavailable with --probe-only"
                     .to_string(),
             );
         }
-        if config.ensemble_primary_weight_explicit
-            && (config.ensemble_output_dir.is_none() || !config.eval_only || config.probe_only)
+        if self.ensemble_third_output_dir.is_some()
+            && (self.ensemble_output_dir.is_none() || !self.eval_only || self.probe_only)
+        {
+            return Err(
+                "--ensemble-third-output-dir requires --ensemble-output-dir with --eval-only"
+                    .to_string(),
+            );
+        }
+        if self.ensemble_third_output_dir.is_some() && self.ensemble_weights.is_none() {
+            return Err(
+                "a third ensemble checkpoint requires --ensemble-weights W1 W2 W3".to_string(),
+            );
+        }
+        if self.ensemble_weights.is_some() && self.ensemble_third_output_dir.is_none() {
+            return Err("--ensemble-weights requires --ensemble-third-output-dir".to_string());
+        }
+        if self.ensemble_weights.is_some() && self.ensemble_primary_weight_explicit {
+            return Err(
+                "--ensemble-primary-weight cannot be combined with --ensemble-weights".to_string(),
+            );
+        }
+        if self.ensemble_primary_weight_explicit
+            && (self.ensemble_output_dir.is_none() || !self.eval_only || self.probe_only)
         {
             return Err(
                 "--ensemble-primary-weight requires --ensemble-output-dir with --eval-only"
                     .to_string(),
             );
         }
-        Ok(Some(config))
+        if let Some(weights) = self.ensemble_weights {
+            self.ensemble_weights = Some(normalize_ensemble_weights(weights)?);
+        }
+        Ok(())
     }
 
     pub(crate) fn usage() -> &'static str {
@@ -133,11 +177,27 @@ impl TrainConfig {
          [--learning-rate RATE] [--attribute-loss-weight WEIGHT] [--seed N] [--atlas-dir PATH] \
          [--validation-atlas-dir PATH] [--output-dir PATH] [--eval-only] \
          [--ensemble-output-dir PATH] \
+         [--ensemble-third-output-dir PATH] \
          [--ensemble-primary-weight W] \
+         [--ensemble-weights W1 W2 W3] \
          [--probe-only] \
          [--eval-batches N] [--eval-boards N] [--triple-seed N] [--board-seed N] \
          [--no-augment]"
     }
+}
+
+fn normalize_ensemble_weights(weights: [f64; 3]) -> Result<[f64; 3], String> {
+    if weights
+        .iter()
+        .any(|weight| !weight.is_finite() || *weight <= 0.0)
+    {
+        return Err("three ensemble weights must be finite and positive".to_string());
+    }
+    let total = weights.iter().sum::<f64>();
+    if !total.is_finite() || total <= 0.0 {
+        return Err("three ensemble weights must have a finite positive sum".to_string());
+    }
+    Ok(weights.map(|weight| weight / total))
 }
 
 fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
@@ -233,6 +293,32 @@ mod tests {
     }
 
     #[test]
+    fn explicit_three_checkpoint_weights_are_normalized() {
+        let args = [
+            "--eval-only",
+            "--ensemble-output-dir",
+            "/tmp/second-checkpoint",
+            "--ensemble-third-output-dir",
+            "/tmp/third-checkpoint",
+            "--ensemble-weights",
+            "2",
+            "3",
+            "5",
+        ]
+        .into_iter()
+        .map(str::to_string);
+        let config = TrainConfig::from_iter(args)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+
+        let weights = config.ensemble_weights.unwrap_or([0.0; 3]);
+        assert!((weights[0] - 0.2).abs() < f64::EPSILON);
+        assert!((weights[1] - 0.3).abs() < f64::EPSILON);
+        assert!((weights[2] - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn ensemble_output_dir_requires_eval_only() {
         let args = ["--ensemble-output-dir", "/tmp/second-checkpoint"]
             .into_iter()
@@ -270,6 +356,75 @@ mod tests {
         let args = ["--eval-only", "--ensemble-primary-weight", "0.7"]
             .into_iter()
             .map(str::to_string);
+        assert!(TrainConfig::from_iter(args).is_err());
+    }
+
+    #[test]
+    fn three_checkpoint_weights_require_third_checkpoint_and_positive_values() {
+        let args = [
+            "--eval-only",
+            "--ensemble-output-dir",
+            "/tmp/second-checkpoint",
+            "--ensemble-weights",
+            "1",
+            "1",
+            "1",
+        ]
+        .into_iter()
+        .map(str::to_string);
+        assert!(TrainConfig::from_iter(args).is_err());
+
+        let args = [
+            "--eval-only",
+            "--ensemble-third-output-dir",
+            "/tmp/third-checkpoint",
+            "--ensemble-weights",
+            "1",
+            "1",
+            "1",
+        ]
+        .into_iter()
+        .map(str::to_string);
+        assert!(TrainConfig::from_iter(args).is_err());
+
+        for value in ["0", "-1", "NaN", "inf"] {
+            let args = [
+                "--eval-only",
+                "--ensemble-output-dir",
+                "/tmp/second-checkpoint",
+                "--ensemble-third-output-dir",
+                "/tmp/third-checkpoint",
+                "--ensemble-weights",
+                value,
+                "1",
+                "1",
+            ]
+            .into_iter()
+            .map(str::to_string);
+            assert!(
+                TrainConfig::from_iter(args).is_err(),
+                "accepted weight {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn three_checkpoint_weights_cannot_be_combined_with_two_checkpoint_weight() {
+        let args = [
+            "--eval-only",
+            "--ensemble-output-dir",
+            "/tmp/second-checkpoint",
+            "--ensemble-third-output-dir",
+            "/tmp/third-checkpoint",
+            "--ensemble-primary-weight",
+            "0.6",
+            "--ensemble-weights",
+            "1",
+            "1",
+            "1",
+        ]
+        .into_iter()
+        .map(str::to_string);
         assert!(TrainConfig::from_iter(args).is_err());
     }
 }
