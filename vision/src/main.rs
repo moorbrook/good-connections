@@ -570,6 +570,7 @@ struct AbstentionSample {
     relation_class_count: usize,
     triple_targets: Vec<f64>,
     attribute_logits: Vec<f64>,
+    card_targets: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -926,6 +927,14 @@ fn evaluate(
             relation_class_count: output.relation_class_count,
             triple_targets: board.set_targets.clone(),
             attribute_logits: output.attribute_logits.clone(),
+            card_targets: board
+                .ids
+                .iter()
+                .flat_map(|&id| {
+                    decode_card(id)
+                        .map(|value| [0.0, 1.0, 2.0].get(value).copied().unwrap_or(f64::NAN))
+                })
+                .collect(),
         });
         if !correct {
             let best_valid = output
@@ -1446,7 +1455,7 @@ fn write_board_relation_evidence(
     let mut writer = std::io::BufWriter::new(file);
     writeln!(
         writer,
-        "atlas\texpected_kind\tstrongest_is_set\trelation_class_count\ttriple_scores\trelation_logits\ttriple_targets\tattribute_logits"
+        "atlas\texpected_kind\tstrongest_is_set\trelation_class_count\ttriple_scores\trelation_logits\ttriple_targets\tattribute_logits\tcard_targets"
     )?;
     for sample in samples {
         write!(
@@ -1464,6 +1473,8 @@ fn write_board_relation_evidence(
         write_f64_list(&mut writer, &sample.triple_targets)?;
         write!(writer, "\t")?;
         write_f64_list(&mut writer, &sample.attribute_logits)?;
+        write!(writer, "\t")?;
+        write_f64_list(&mut writer, &sample.card_targets)?;
         writeln!(writer)?;
     }
     writer.flush()?;

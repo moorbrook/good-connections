@@ -92,3 +92,20 @@ reweighting is also rejected. The next architecture experiment must reason
 contextually across the twelve shared cards before triple scoring, allowing
 the model to reconcile a locally plausible attribute error with the rest of
 the board. This is a learned contextual reader, not a symbolic SET solver.
+
+The contextual-reader search improved corrected card attributes to roughly
+99.88% and introduced an exact differentiable relation layer that retains the
+full three-card probability products for `same`, `different`, and `invalid`.
+One exposed 4,096-board split crossed the raw goal at 99.0234%, and a later
+8,192-board development transfer reached 99.0112%. Neither replicated after
+the architecture and calibration rule were frozen: the next disjoint board
+stream scored 98.7305%. Sorted-score board MLPs, exact-score board summaries,
+additional reader replicas, learned replica weights, and score normalization
+were all rejected.
+
+Board-v9 therefore remains in exposed architecture development. No fresh v9
+render corpus or sealed gate should be opened yet. The next candidate must
+improve the visual fill specialist or its uncertainty calibration before the
+fixed differentiable relation layer. The large NumPy probes are research
+harnesses only; they are not the browser architecture and are named separately
+to avoid implying otherwise.

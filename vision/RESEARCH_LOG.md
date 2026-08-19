@@ -712,3 +712,55 @@ when blended. This falsifies simple specialist loss reweighting. The next
 model-search direction is a contextual card reader that can reconcile the
 twelve shared card predictions before action scoring; isolated triple readers
 cannot correct a visually plausible but globally inconsistent card error.
+
+**Contextual card-reader search.** Board evidence now includes the procedural
+target attributes for all twelve cards, which makes card correction measurable
+without reading labels back from filenames. The PEP 723 probe
+`analyze_contextual_reader.py` tested leave-one-out board summaries, a learned
+hypergraph corrector over the 55 triples incident to each card, independent
+corrector replicas, learned stacking of the four frozen vision models, typed
+relation readers, score blends, and learned board heads. On a 4,096-board
+development half plus a disjoint 4,096-board test half, the learned stacker and
+hypergraph corrector reached 99.8739% card-attribute accuracy, including
+99.5178% fill accuracy. Its eight-reader action ensemble nevertheless reached
+only 98.4863% raw action accuracy (62 failures). A nonlinear board-existence
+head over sorted score, relation, confidence, and entropy features was worse at
+98.1445%. Both heads are rejected.
+
+The useful architectural result is an exact differentiable relation layer.
+For each attribute it computes the probability of `same` as the sum of three
+classwise products and `different` as the sum over the six class permutations;
+`invalid` is the remaining probability. Products and sums preserve gradients,
+so this is a fixed neural layer rather than an argmax attribute decoder. A
+direct product across the four valid-relation probabilities reached 98.8525%
+on the first held-out stream. A small learned SET head over the exact relation
+probabilities reached 98.9502% with its development threshold. Its test-only
+threshold ceiling was 99.0479%, identifying calibration as part, but not all,
+of the gap.
+
+Threshold ties were then made explicit. Selecting the conservative edge of a
+development tie improved the direct soft reader to 98.9746%. For one learned
+exact-relation replica, taking the more conservative of thresholds fit on two
+development halves reached 40 failures in 4,096 boards: 99.0234% overall,
+99.4141% Has SET, and 98.6328% No SET. This is an exposed development crossing,
+not a promoted result.
+
+**Board-seed replication falsification.** The architecture, seeds, and
+conservative split-threshold rule were frozen before a disjoint procedural
+board stream with seed `2026081901`. The chosen exact-relation replica fell to
+98.6572%; even its test-only threshold ceiling was 98.6816%. Training the
+contextual reader on all 8,192 boards of the original stream and evaluating all
+8,192 boards of this second stream produced a uniform four-head result of
+99.0112% (81 failures). Because that ensemble choice was exposed to the second
+stream, it was frozen and repeated with stream two as development and a third
+stream, seed `2026081902`, as test. It failed at 98.7305% (104 failures).
+Per-head development normalization and a board reader over exact-score
+summaries did not improve it. The third stream's corrected card attributes were
+99.8866% accurate, but fill remained the bottleneck at 99.5555%.
+
+Contextual post-processing and the differentiable relation layer are retained
+as research probes, but neither is integrated into the browser policy. The 99%
+raw v9 action goal has not replicated. The next architecture search should
+improve fill evidence or calibrated attribute uncertainty in the visual
+specialist itself, then reuse the exact differentiable relation layer; further
+heads over the current frozen evidence are not justified by these results.
