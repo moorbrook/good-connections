@@ -578,3 +578,26 @@ allocation all matched the pre-run lock. No abstention, confidence guard,
 rerun, coefficient change, or sealed-data tuning was used. Board-v8 sealed is
 now exposed and retired; this result is the final finite-distribution holdout
 measurement for the cycle.
+
+## 2026-08-19 — Board-v9 typed relations and No SET action
+
+Board-v9 begins from a newly exposed limitation of the earlier benchmark: its
+board sampler rejected every board without a valid SET. The new evaluator can
+generate both classes exactly and treats `NoSet` as a proper raw game action,
+not an abstention. Mixed evaluation alternates solvable and no-SET boards and
+reports each conditional accuracy separately.
+
+The research architecture now supervises `same`, `different`, and `invalid`
+for each of count, colour, shape, and fill. The relation head emits three logits
+per attribute; its softmax probabilities feed the SET head, preserving an
+entirely differentiable training path. The final `argmax` names relations only
+outside training. This raises the research policy from 44,254 to 44,448 learned
+parameters. Legacy deployed and v8 research policies remain explicit separate
+types and continue to reject incompatible state dictionaries strictly.
+
+The data, policy, native trainer, and direct MPSGraph trainer passed their unit
+tests and strict Clippy checks. A one-step fixed-batch backend parity probe
+produced loss `6.396099` in MPSGraph and `6.396099628` after strict checkpoint
+loading in FrankenTorch, with matching first-layer gradients. Architecture
+development will use only exposed v8 data before fresh v9 corpus seeds and
+gates are locked. Full design details are in `BOARD_V9_PLAN.md`.

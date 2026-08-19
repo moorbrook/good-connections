@@ -7,9 +7,109 @@ use ft_api::FrankenTorchSession;
 use ft_core::ExecutionMode;
 use ft_nn::{BCEWithLogitsLoss, CrossEntropyLoss, LossModule, Module};
 use ft_optim::{AdamW, Optimizer};
-use set_vision_data::{AtlasCollection, Rng, decode_card};
-use set_vision_policy::{BoardDecision, BoardScores, CARD_PIXELS, ResearchVisualSetPolicy};
+use set_vision_data::{AtlasCollection, BoardKind, Rng, decode_card};
+use set_vision_policy::{
+    BoardDecision, BoardScores, CARD_PIXELS, RawBoardAction, ResearchVisualSetPolicy,
+    TypedRelationResearchPolicy,
+};
 use std::io::Write;
+
+#[derive(Debug)]
+enum ResearchPolicyVariant {
+    Legacy(ResearchVisualSetPolicy),
+    Typed(TypedRelationResearchPolicy),
+}
+
+impl ResearchPolicyVariant {
+    fn new(
+        session: &mut FrankenTorchSession,
+        typed_relations: bool,
+    ) -> Result<Self, ft_autograd::AutogradError> {
+        if typed_relations {
+            TypedRelationResearchPolicy::new(session).map(Self::Typed)
+        } else {
+            ResearchVisualSetPolicy::new(session).map(Self::Legacy)
+        }
+    }
+
+    fn forward_with_relations(
+        &self,
+        session: &mut FrankenTorchSession,
+        input: ft_autograd::TensorNodeId,
+    ) -> Result<PolicyOutputs, ft_autograd::AutogradError> {
+        match self {
+            Self::Legacy(policy) => {
+                let (set_logits, attribute_logits) =
+                    policy.forward_with_attributes(session, input)?;
+                Ok(PolicyOutputs {
+                    set: set_logits,
+                    attributes: attribute_logits,
+                    relations: None,
+                })
+            }
+            Self::Typed(policy) => {
+                let (set_logits, attribute_logits, relation_logits) =
+                    policy.forward_with_relations(session, input)?;
+                Ok(PolicyOutputs {
+                    set: set_logits,
+                    attributes: attribute_logits,
+                    relations: Some(relation_logits),
+                })
+            }
+        }
+    }
+
+    fn score_board(
+        &self,
+        session: &mut FrankenTorchSession,
+        pixels: Vec<f64>,
+        card_count: usize,
+    ) -> Result<BoardScores, set_vision_policy::PolicyError> {
+        match self {
+            Self::Legacy(policy) => policy.score_board(session, pixels, card_count),
+            Self::Typed(policy) => policy.score_board(session, pixels, card_count),
+        }
+    }
+}
+
+impl Module for ResearchPolicyVariant {
+    fn forward(
+        &self,
+        session: &mut FrankenTorchSession,
+        input: ft_autograd::TensorNodeId,
+    ) -> Result<ft_autograd::TensorNodeId, ft_autograd::AutogradError> {
+        match self {
+            Self::Legacy(policy) => policy.forward(session, input),
+            Self::Typed(policy) => policy.forward(session, input),
+        }
+    }
+
+    fn parameters(&self) -> Vec<ft_autograd::TensorNodeId> {
+        match self {
+            Self::Legacy(policy) => policy.parameters(),
+            Self::Typed(policy) => policy.parameters(),
+        }
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module)> {
+        match self {
+            Self::Legacy(policy) => policy.named_children(),
+            Self::Typed(policy) => policy.named_children(),
+        }
+    }
+}
+
+struct PolicyOutputs {
+    set: ft_autograd::TensorNodeId,
+    attributes: ft_autograd::TensorNodeId,
+    relations: Option<ft_autograd::TensorNodeId>,
+}
+
+struct PolicyValueOutputs {
+    set: Vec<f64>,
+    attributes: Vec<f64>,
+    relations: Option<Vec<f64>>,
+}
 
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,7 +129,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = Rng::new(config.seed);
 
     let mut session = FrankenTorchSession::new(ExecutionMode::Strict);
-    let model = ResearchVisualSetPolicy::new(&mut session)?;
+    let model = ResearchPolicyVariant::new(&mut session, config.typed_relations)?;
     if config.eval_only || config.probe_only {
         let checkpoint = config.output_dir.join("set-vision.ftsv");
         let state = ft_serialize::load_state_dict(&checkpoint)?;
@@ -39,7 +139,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let graph_boundary = session.autograd_graph_node_count();
     let mut ensemble = if let Some(output_dir) = config.ensemble_output_dir.as_ref() {
         let mut ensemble_session = FrankenTorchSession::new(ExecutionMode::Strict);
-        let ensemble_model = ResearchVisualSetPolicy::new(&mut ensemble_session)?;
+        let ensemble_model =
+            ResearchPolicyVariant::new(&mut ensemble_session, config.typed_relations)?;
         let checkpoint = output_dir.join("set-vision.ftsv");
         let state = ft_serialize::load_state_dict(&checkpoint)?;
         ensemble_model.load_state_dict(&mut ensemble_session, &state, true)?;
@@ -48,7 +149,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut third = None;
         if let Some(third_output_dir) = config.ensemble_third_output_dir.as_ref() {
             let mut third_session = FrankenTorchSession::new(ExecutionMode::Strict);
-            let third_model = ResearchVisualSetPolicy::new(&mut third_session)?;
+            let third_model =
+                ResearchPolicyVariant::new(&mut third_session, config.typed_relations)?;
             let third_checkpoint = third_output_dir.join("set-vision.ftsv");
             let third_state = ft_serialize::load_state_dict(&third_checkpoint)?;
             third_model.load_state_dict(&mut third_session, &third_state, true)?;
@@ -63,7 +165,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut fourth = None;
         if let Some(fourth_output_dir) = config.ensemble_fourth_output_dir.as_ref() {
             let mut fourth_session = FrankenTorchSession::new(ExecutionMode::Strict);
-            let fourth_model = ResearchVisualSetPolicy::new(&mut fourth_session)?;
+            let fourth_model =
+                ResearchPolicyVariant::new(&mut fourth_session, config.typed_relations)?;
             let fourth_checkpoint = fourth_output_dir.join("set-vision.ftsv");
             let fourth_state = ft_serialize::load_state_dict(&fourth_checkpoint)?;
             fourth_model.load_state_dict(&mut fourth_session, &fourth_state, true)?;
@@ -126,14 +229,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let set_targets = session.tensor_variable(batch.set_targets, vec![64, 1], false)?;
         let attribute_targets =
             session.tensor_variable(batch.attribute_targets, vec![64 * 3 * 4], false)?;
-        let (set_logits, attribute_logits) = model.forward_with_attributes(&mut session, input)?;
-        let attribute_logits = session.tensor_reshape(attribute_logits, vec![64 * 3 * 4, 3])?;
-        let set_loss = BCEWithLogitsLoss.forward(&mut session, set_logits, set_targets)?;
+        let relation_targets =
+            session.tensor_variable(batch.relation_targets, vec![64 * 4], false)?;
+        let outputs = model.forward_with_relations(&mut session, input)?;
+        let attribute_logits = session.tensor_reshape(outputs.attributes, vec![64 * 3 * 4, 3])?;
+        let set_loss = BCEWithLogitsLoss.forward(&mut session, outputs.set, set_targets)?;
         let attribute_loss =
             CrossEntropyLoss.forward(&mut session, attribute_logits, attribute_targets)?;
         let attribute_loss =
             session.tensor_mul_scalar(attribute_loss, config.attribute_loss_weight)?;
-        let loss = session.tensor_add(set_loss, attribute_loss)?;
+        let mut loss = session.tensor_add(set_loss, attribute_loss)?;
+        if let Some(relation_logits) = outputs.relations {
+            let relation_logits = session.tensor_reshape(relation_logits, vec![64 * 4, 3])?;
+            let relation_loss =
+                CrossEntropyLoss.forward(&mut session, relation_logits, relation_targets)?;
+            let relation_loss =
+                session.tensor_mul_scalar(relation_loss, config.relation_loss_weight)?;
+            loss = session.tensor_add(loss, relation_loss)?;
+        }
         println!("probe_loss: {:.9}", session.tensor_values(loss)?[0]);
         let _report = session.tensor_backward(loss)?;
         let first_parameter = model.parameters()[0];
@@ -174,16 +287,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 vec![config.batch_size * 3 * 4],
                 false,
             )?;
-            let (set_logits, attribute_logits) =
-                model.forward_with_attributes(&mut session, input)?;
+            let relation_targets = session.tensor_variable(
+                batch.relation_targets,
+                vec![config.batch_size * 4],
+                false,
+            )?;
+            let outputs = model.forward_with_relations(&mut session, input)?;
             let attribute_logits =
-                session.tensor_reshape(attribute_logits, vec![config.batch_size * 3 * 4, 3])?;
-            let set_loss = BCEWithLogitsLoss.forward(&mut session, set_logits, set_targets)?;
+                session.tensor_reshape(outputs.attributes, vec![config.batch_size * 3 * 4, 3])?;
+            let set_loss = BCEWithLogitsLoss.forward(&mut session, outputs.set, set_targets)?;
             let attribute_loss =
                 CrossEntropyLoss.forward(&mut session, attribute_logits, attribute_targets)?;
             let attribute_loss =
                 session.tensor_mul_scalar(attribute_loss, config.attribute_loss_weight)?;
-            let loss = session.tensor_add(set_loss, attribute_loss)?;
+            let mut loss = session.tensor_add(set_loss, attribute_loss)?;
+            if let Some(relation_logits) = outputs.relations {
+                let relation_logits =
+                    session.tensor_reshape(relation_logits, vec![config.batch_size * 4, 3])?;
+                let relation_loss =
+                    CrossEntropyLoss.forward(&mut session, relation_logits, relation_targets)?;
+                let relation_loss =
+                    session.tensor_mul_scalar(relation_loss, config.relation_loss_weight)?;
+                loss = session.tensor_add(loss, relation_loss)?;
+            }
             let loss_value = session.tensor_values(loss)?[0];
             let report = session.tensor_backward(loss)?;
             optimizer.step(&mut session, &report)?;
@@ -206,6 +332,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.eval_boards,
         config.triple_seed,
         config.board_seed,
+        config.mixed_boards,
     )?;
     println!("triple_seed: {}", config.triple_seed);
     println!("board_seed: {}", config.board_seed);
@@ -226,8 +353,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         evaluation.attribute_accuracy_by_kind[2],
         evaluation.attribute_accuracy_by_kind[3]
     );
+    if evaluation.relation_total > 0 {
+        println!("relation_accuracy: {:.6}", evaluation.relation_accuracy);
+        println!(
+            "relation_correct: {}/{}",
+            evaluation.relation_correct, evaluation.relation_total
+        );
+    }
     println!("board_accuracy: {:.6}", evaluation.board_accuracy);
     println!("board_failures: {}", evaluation.board_failures);
+    println!(
+        "board_set_accuracy: {:.6} ({}/{})",
+        evaluation.board_set_accuracy,
+        evaluation.board_set_total - evaluation.board_set_failures,
+        evaluation.board_set_total
+    );
+    println!(
+        "board_no_set_accuracy: {:.6} ({}/{})",
+        evaluation.board_no_set_accuracy,
+        evaluation.board_no_set_total - evaluation.board_no_set_failures,
+        evaluation.board_no_set_total
+    );
     for atlas in &evaluation.atlases {
         println!(
             "atlas: {} attribute_accuracy={:.6} board_accuracy={:.6} boards={}",
@@ -250,13 +396,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 struct EnsembleMember {
     session: FrankenTorchSession,
-    model: ResearchVisualSetPolicy,
+    model: ResearchPolicyVariant,
     graph_boundary: usize,
 }
 
 struct EnsemblePolicy {
     session: FrankenTorchSession,
-    model: ResearchVisualSetPolicy,
+    model: ResearchPolicyVariant,
     graph_boundary: usize,
     third: Option<EnsembleMember>,
     fourth: Option<EnsembleMember>,
@@ -270,10 +416,19 @@ struct Evaluation {
     attribute_accuracy_by_kind: [f64; 4],
     board_accuracy: f64,
     board_failures: usize,
+    board_set_accuracy: f64,
+    board_set_failures: usize,
+    board_set_total: usize,
+    board_no_set_accuracy: f64,
+    board_no_set_failures: usize,
+    board_no_set_total: usize,
     triple_correct: usize,
     triple_total: usize,
     attribute_correct: usize,
     attribute_total: usize,
+    relation_accuracy: f64,
+    relation_correct: usize,
+    relation_total: usize,
     seconds: f64,
     atlases: Vec<AtlasEvaluation>,
     abstention_samples: Vec<AbstentionSample>,
@@ -283,6 +438,7 @@ struct Evaluation {
 struct AbstentionSample {
     atlas: String,
     correct: bool,
+    action: RawBoardAction,
     decision: BoardDecision,
 }
 
@@ -297,7 +453,7 @@ struct AtlasEvaluation {
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn evaluate(
     session: &mut FrankenTorchSession,
-    model: &ResearchVisualSetPolicy,
+    model: &ResearchPolicyVariant,
     mut ensemble: Option<&mut EnsemblePolicy>,
     atlases: &AtlasCollection,
     graph_boundary: usize,
@@ -305,12 +461,15 @@ fn evaluate(
     boards: usize,
     triple_seed: u64,
     board_seed: u64,
+    mixed_boards: bool,
 ) -> Result<Evaluation, Box<dyn std::error::Error>> {
     const BATCH_SIZE: usize = 64;
     const BOARD_CARDS: usize = 12;
     let started = std::time::Instant::now();
     let mut triple_correct = 0_usize;
     let mut attribute_correct = 0_usize;
+    let mut relation_correct = 0_usize;
+    let mut relation_total = 0_usize;
     let mut attribute_correct_by_kind = [0_usize; 4];
     let mut atlas_attribute_correct = vec![0_usize; atlases.len()];
     let mut atlas_attribute_total = vec![0_usize; atlases.len()];
@@ -331,169 +490,134 @@ fn evaluate(
     }
     for _ in 0..batches {
         let batch = atlases.make_batch(&mut triple_rng, BATCH_SIZE, false);
-        let (set_values, attribute_values) = if let Some(ensemble) = ensemble.as_deref_mut() {
+        let values = if let Some(ensemble) = ensemble.as_deref_mut() {
             if ensemble.fourth.is_some() {
-                let input = session.tensor_variable(
+                let primary =
+                    policy_value_outputs(session, model, batch.pixels.clone(), BATCH_SIZE)?;
+                let secondary = policy_value_outputs(
+                    &mut ensemble.session,
+                    &ensemble.model,
                     batch.pixels.clone(),
-                    vec![BATCH_SIZE, 3, CARD_PIXELS],
-                    false,
+                    BATCH_SIZE,
                 )?;
-                let (set_logits, attribute_logits) =
-                    model.forward_with_attributes(session, input)?;
-                let ensemble_input = ensemble.session.tensor_variable(
-                    batch.pixels.clone(),
-                    vec![BATCH_SIZE, 3, CARD_PIXELS],
-                    false,
-                )?;
-                let (ensemble_set_logits, ensemble_attribute_logits) = ensemble
-                    .model
-                    .forward_with_attributes(&mut ensemble.session, ensemble_input)?;
                 let third = ensemble
                     .third
                     .as_mut()
                     .ok_or("third ensemble model disappeared")?;
-                let third_input = third.session.tensor_variable(
+                let tertiary = policy_value_outputs(
+                    &mut third.session,
+                    &third.model,
                     batch.pixels.clone(),
-                    vec![BATCH_SIZE, 3, CARD_PIXELS],
-                    false,
+                    BATCH_SIZE,
                 )?;
-                let (third_set_logits, third_attribute_logits) = third
-                    .model
-                    .forward_with_attributes(&mut third.session, third_input)?;
                 let fourth = ensemble
                     .fourth
                     .as_mut()
                     .ok_or("fourth ensemble model disappeared")?;
-                let fourth_input = fourth.session.tensor_variable(
+                let quaternary = policy_value_outputs(
+                    &mut fourth.session,
+                    &fourth.model,
                     batch.pixels,
-                    vec![BATCH_SIZE, 3, CARD_PIXELS],
-                    false,
+                    BATCH_SIZE,
                 )?;
-                let (fourth_set_logits, fourth_attribute_logits) = fourth
-                    .model
-                    .forward_with_attributes(&mut fourth.session, fourth_input)?;
-                let primary_set_values = session.tensor_values(set_logits)?;
-                let ensemble_set_values = ensemble.session.tensor_values(ensemble_set_logits)?;
-                let third_set_values = third.session.tensor_values(third_set_logits)?;
-                let fourth_set_values = fourth.session.tensor_values(fourth_set_logits)?;
-                let primary_attribute_values = session.tensor_values(attribute_logits)?;
-                let ensemble_attribute_values =
-                    ensemble.session.tensor_values(ensemble_attribute_logits)?;
-                let third_attribute_values = third.session.tensor_values(third_attribute_logits)?;
-                let fourth_attribute_values =
-                    fourth.session.tensor_values(fourth_attribute_logits)?;
-                let set_values = weighted_average_four(
-                    &primary_set_values,
-                    &ensemble_set_values,
-                    &third_set_values,
-                    &fourth_set_values,
-                    ensemble.weights,
-                )?;
-                let attribute_values = weighted_average_four(
-                    &primary_attribute_values,
-                    &ensemble_attribute_values,
-                    &third_attribute_values,
-                    &fourth_attribute_values,
-                    ensemble.weights,
-                )?;
-                (set_values, attribute_values)
+                PolicyValueOutputs {
+                    set: weighted_average_four(
+                        &primary.set,
+                        &secondary.set,
+                        &tertiary.set,
+                        &quaternary.set,
+                        ensemble.weights,
+                    )?,
+                    attributes: weighted_average_four(
+                        &primary.attributes,
+                        &secondary.attributes,
+                        &tertiary.attributes,
+                        &quaternary.attributes,
+                        ensemble.weights,
+                    )?,
+                    relations: average_optional_four(
+                        primary.relations.as_deref(),
+                        secondary.relations.as_deref(),
+                        tertiary.relations.as_deref(),
+                        quaternary.relations.as_deref(),
+                        ensemble.weights,
+                    )?,
+                }
             } else if ensemble.third.is_some() {
-                let input = session.tensor_variable(
+                let primary =
+                    policy_value_outputs(session, model, batch.pixels.clone(), BATCH_SIZE)?;
+                let secondary = policy_value_outputs(
+                    &mut ensemble.session,
+                    &ensemble.model,
                     batch.pixels.clone(),
-                    vec![BATCH_SIZE, 3, CARD_PIXELS],
-                    false,
+                    BATCH_SIZE,
                 )?;
-                let (set_logits, attribute_logits) =
-                    model.forward_with_attributes(session, input)?;
-                let ensemble_input = ensemble.session.tensor_variable(
-                    batch.pixels.clone(),
-                    vec![BATCH_SIZE, 3, CARD_PIXELS],
-                    false,
-                )?;
-                let (ensemble_set_logits, ensemble_attribute_logits) = ensemble
-                    .model
-                    .forward_with_attributes(&mut ensemble.session, ensemble_input)?;
                 let third = ensemble
                     .third
                     .as_mut()
                     .ok_or("third ensemble model disappeared")?;
-                let third_input = third.session.tensor_variable(
+                let tertiary = policy_value_outputs(
+                    &mut third.session,
+                    &third.model,
                     batch.pixels,
-                    vec![BATCH_SIZE, 3, CARD_PIXELS],
-                    false,
+                    BATCH_SIZE,
                 )?;
-                let (third_set_logits, third_attribute_logits) = third
-                    .model
-                    .forward_with_attributes(&mut third.session, third_input)?;
-                let primary_set_values = session.tensor_values(set_logits)?;
-                let ensemble_set_values = ensemble.session.tensor_values(ensemble_set_logits)?;
-                let third_set_values = third.session.tensor_values(third_set_logits)?;
-                let primary_attribute_values = session.tensor_values(attribute_logits)?;
-                let ensemble_attribute_values =
-                    ensemble.session.tensor_values(ensemble_attribute_logits)?;
-                let third_attribute_values = third.session.tensor_values(third_attribute_logits)?;
-                let set_values = weighted_average_three(
-                    &primary_set_values,
-                    &ensemble_set_values,
-                    &third_set_values,
-                    [
-                        ensemble.weights[0],
-                        ensemble.weights[1],
-                        ensemble.weights[2],
-                    ],
-                )?;
-                let attribute_values = weighted_average_three(
-                    &primary_attribute_values,
-                    &ensemble_attribute_values,
-                    &third_attribute_values,
-                    [
-                        ensemble.weights[0],
-                        ensemble.weights[1],
-                        ensemble.weights[2],
-                    ],
-                )?;
-                (set_values, attribute_values)
+                let weights = [
+                    ensemble.weights[0],
+                    ensemble.weights[1],
+                    ensemble.weights[2],
+                ];
+                PolicyValueOutputs {
+                    set: weighted_average_three(
+                        &primary.set,
+                        &secondary.set,
+                        &tertiary.set,
+                        weights,
+                    )?,
+                    attributes: weighted_average_three(
+                        &primary.attributes,
+                        &secondary.attributes,
+                        &tertiary.attributes,
+                        weights,
+                    )?,
+                    relations: average_optional_three(
+                        primary.relations.as_deref(),
+                        secondary.relations.as_deref(),
+                        tertiary.relations.as_deref(),
+                        weights,
+                    )?,
+                }
             } else {
-                let input = session.tensor_variable(
-                    batch.pixels.clone(),
-                    vec![BATCH_SIZE, 3, CARD_PIXELS],
-                    false,
-                )?;
-                let (set_logits, attribute_logits) =
-                    model.forward_with_attributes(session, input)?;
-                let ensemble_input = ensemble.session.tensor_variable(
+                let primary =
+                    policy_value_outputs(session, model, batch.pixels.clone(), BATCH_SIZE)?;
+                let secondary = policy_value_outputs(
+                    &mut ensemble.session,
+                    &ensemble.model,
                     batch.pixels,
-                    vec![BATCH_SIZE, 3, CARD_PIXELS],
-                    false,
+                    BATCH_SIZE,
                 )?;
-                let (ensemble_set_logits, ensemble_attribute_logits) = ensemble
-                    .model
-                    .forward_with_attributes(&mut ensemble.session, ensemble_input)?;
-                let set_values = average_logits(
-                    &session.tensor_values(set_logits)?,
-                    &ensemble.session.tensor_values(ensemble_set_logits)?,
-                    ensemble.weights[0],
-                )?;
-                let attribute_values = average_logits(
-                    &session.tensor_values(attribute_logits)?,
-                    &ensemble.session.tensor_values(ensemble_attribute_logits)?,
-                    ensemble.weights[0],
-                )?;
-                (set_values, attribute_values)
+                PolicyValueOutputs {
+                    set: average_logits(&primary.set, &secondary.set, ensemble.weights[0])?,
+                    attributes: average_logits(
+                        &primary.attributes,
+                        &secondary.attributes,
+                        ensemble.weights[0],
+                    )?,
+                    relations: average_optional(
+                        primary.relations.as_deref(),
+                        secondary.relations.as_deref(),
+                        ensemble.weights[0],
+                    )?,
+                }
             }
         } else {
-            let input =
-                session.tensor_variable(batch.pixels, vec![BATCH_SIZE, 3, CARD_PIXELS], false)?;
-            let (set_logits, attribute_logits) = model.forward_with_attributes(session, input)?;
-            (
-                session.tensor_values(set_logits)?,
-                session.tensor_values(attribute_logits)?,
-            )
+            policy_value_outputs(session, model, batch.pixels, BATCH_SIZE)?
         };
-        for (logit, target) in set_values.iter().zip(batch.set_targets) {
+        for (logit, target) in values.set.iter().zip(batch.set_targets) {
             triple_correct += usize::from((*logit >= 0.0) == (target >= 0.5));
         }
-        for (attribute_index, (logits, target)) in attribute_values
+        for (attribute_index, (logits, target)) in values
+            .attributes
             .as_chunks::<3>()
             .0
             .iter()
@@ -512,6 +636,22 @@ fn evaluate(
             atlas_attribute_correct[atlas_index] += usize::from(correct);
             atlas_attribute_total[atlas_index] += 1;
         }
+        if let Some(relation_values) = values.relations.as_deref() {
+            for (logits, target) in relation_values
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(batch.relation_targets)
+            {
+                let predicted = logits
+                    .iter()
+                    .enumerate()
+                    .max_by(|left, right| left.1.total_cmp(right.1))
+                    .map_or(usize::MAX, |(index, _)| index);
+                relation_correct += usize::from(predicted == attribute_target_index(target));
+                relation_total += 1;
+            }
+        }
         session.truncate_autograd_graph(graph_boundary);
         if let Some(ensemble) = ensemble.as_deref_mut() {
             ensemble
@@ -528,8 +668,17 @@ fn evaluate(
         }
     }
     let mut board_failures = 0_usize;
-    for _ in 0..boards {
-        let board = atlases.make_board(&mut board_rng, BOARD_CARDS);
+    let mut board_set_failures = 0_usize;
+    let mut board_set_total = 0_usize;
+    let mut board_no_set_failures = 0_usize;
+    let mut board_no_set_total = 0_usize;
+    for board_index in 0..boards {
+        let kind = if mixed_boards && board_index % 2 == 1 {
+            BoardKind::NoSet
+        } else {
+            BoardKind::HasSet
+        };
+        let board = atlases.make_board_of_kind(&mut board_rng, BOARD_CARDS, kind);
         let output = if let Some(ensemble) = ensemble.as_deref_mut() {
             if ensemble.fourth.is_some() {
                 let primary = model.score_board(session, board.pixels.clone(), BOARD_CARDS)?;
@@ -598,18 +747,32 @@ fn evaluate(
         } else {
             model.score_board(session, board.pixels, BOARD_CARDS)?
         };
-        let decision = output
-            .best_decision()
-            .ok_or("policy produced no finite board decision")?;
+        let (action, decision) = if mixed_boards {
+            let raw = output
+                .best_raw_decision()
+                .ok_or("policy produced no finite raw board decision")?;
+            (raw.action, raw.strongest_triple)
+        } else {
+            let decision = output
+                .best_decision()
+                .ok_or("policy produced no finite board decision")?;
+            (RawBoardAction::Set(decision.triple), decision)
+        };
         let best = output
             .triples
             .iter()
             .position(|triple| *triple == decision.triple)
             .ok_or("policy decision was absent from its triple list")?;
-        let correct = board.set_targets.get(best).copied() == Some(1.0);
+        let correct = match action {
+            RawBoardAction::NoSet => board.kind == BoardKind::NoSet,
+            RawBoardAction::Set(_) => {
+                board.kind == BoardKind::HasSet && board.set_targets.get(best).copied() == Some(1.0)
+            }
+        };
         abstention_samples.push(AbstentionSample {
             atlas: atlases.name(board.atlas_index).to_string(),
             correct,
+            action,
             decision,
         });
         if !correct {
@@ -638,8 +801,9 @@ fn evaluate(
             let best_valid_ids =
                 best_valid_positions.map(|triple| triple.map(|position| board.ids[position]));
             println!(
-                "board_failure: atlas={} selected={:?} actual={:?} predicted={predicted:?} score={:.6} best_valid={:?} best_valid_score={:.6}",
+                "board_failure: atlas={} expected_kind={:?} action={action:?} selected={:?} actual={:?} predicted={predicted:?} score={:.6} best_valid={:?} best_valid_score={:.6}",
                 atlases.name(board.atlas_index),
+                board.kind,
                 selected_ids,
                 selected_ids.map(|triple| triple.map(decode_card)),
                 output
@@ -656,6 +820,16 @@ fn evaluate(
             );
         }
         board_failures += usize::from(!correct);
+        match board.kind {
+            BoardKind::HasSet => {
+                board_set_total += 1;
+                board_set_failures += usize::from(!correct);
+            }
+            BoardKind::NoSet => {
+                board_no_set_total += 1;
+                board_no_set_failures += usize::from(!correct);
+            }
+        }
         atlas_board_correct[board.atlas_index] += usize::from(correct);
         atlas_board_total[board.atlas_index] += 1;
         session.truncate_autograd_graph(graph_boundary);
@@ -693,10 +867,22 @@ fn evaluate(
         }),
         board_accuracy: ratio(boards - board_failures, boards)?,
         board_failures,
+        board_set_accuracy: ratio(board_set_total - board_set_failures, board_set_total.max(1))?,
+        board_set_failures,
+        board_set_total,
+        board_no_set_accuracy: ratio(
+            board_no_set_total - board_no_set_failures,
+            board_no_set_total.max(1),
+        )?,
+        board_no_set_failures,
+        board_no_set_total,
         triple_correct,
         triple_total,
         attribute_correct,
         attribute_total,
+        relation_accuracy: ratio(relation_correct, relation_total.max(1))?,
+        relation_correct,
+        relation_total,
         seconds: started.elapsed().as_secs_f64(),
         abstention_samples,
         atlases: (0..atlases.len())
@@ -753,6 +939,76 @@ fn average_logits(
         averaged.push(value);
     }
     Ok(averaged)
+}
+
+fn policy_value_outputs(
+    session: &mut FrankenTorchSession,
+    model: &ResearchPolicyVariant,
+    pixels: Vec<f64>,
+    batch_size: usize,
+) -> Result<PolicyValueOutputs, Box<dyn std::error::Error>> {
+    let input = session.tensor_variable(pixels, vec![batch_size, 3, CARD_PIXELS], false)?;
+    let outputs = model.forward_with_relations(session, input)?;
+    Ok(PolicyValueOutputs {
+        set: session.tensor_values(outputs.set)?,
+        attributes: session.tensor_values(outputs.attributes)?,
+        relations: outputs
+            .relations
+            .map(|logits| session.tensor_values(logits))
+            .transpose()?,
+    })
+}
+
+fn average_optional(
+    first: Option<&[f64]>,
+    second: Option<&[f64]>,
+    primary_weight: f64,
+) -> Result<Option<Vec<f64>>, std::io::Error> {
+    match (first, second) {
+        (Some(first), Some(second)) => average_logits(first, second, primary_weight).map(Some),
+        (None, None) => Ok(None),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "ensemble relation-output topology mismatch",
+        )),
+    }
+}
+
+fn average_optional_three(
+    first: Option<&[f64]>,
+    second: Option<&[f64]>,
+    third: Option<&[f64]>,
+    weights: [f64; 3],
+) -> Result<Option<Vec<f64>>, std::io::Error> {
+    match (first, second, third) {
+        (Some(first), Some(second), Some(third)) => {
+            weighted_average_three(first, second, third, weights).map(Some)
+        }
+        (None, None, None) => Ok(None),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "three-model relation-output topology mismatch",
+        )),
+    }
+}
+
+fn average_optional_four(
+    first: Option<&[f64]>,
+    second: Option<&[f64]>,
+    third: Option<&[f64]>,
+    fourth: Option<&[f64]>,
+    weights: [f64; 4],
+) -> Result<Option<Vec<f64>>, std::io::Error> {
+    match (first, second, third, fourth) {
+        (Some(first), Some(second), Some(third), Some(fourth)) => {
+            weighted_average_four(first, second, third, fourth, weights).map(Some)
+        }
+        (None, None, None, None) => Ok(None),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "four-model relation-output topology mismatch",
+        )),
+    }
 }
 
 fn average_board_scores(
@@ -972,14 +1228,15 @@ fn write_abstention_samples(
     let mut writer = std::io::BufWriter::new(file);
     writeln!(
         writer,
-        "atlas\tcorrect\tscore\tscore_margin\tmean_attribute_entropy\tmin_attribute_margin"
+        "atlas\tcorrect\taction\tscore\tscore_margin\tmean_attribute_entropy\tmin_attribute_margin"
     )?;
     for sample in samples {
         writeln!(
             writer,
-            "{}\t{}\t{:.12}\t{:.12}\t{:.12}\t{:.12}",
+            "{}\t{}\t{:?}\t{:.12}\t{:.12}\t{:.12}\t{:.12}",
             sample.atlas,
             u8::from(sample.correct),
+            sample.action,
             sample.decision.score,
             sample.decision.score_margin,
             sample.decision.mean_attribute_entropy,

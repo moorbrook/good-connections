@@ -15,7 +15,7 @@ use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice};
 use objc2_metal_performance_shaders::{MPSDataType, MPSShape};
 use objc2_metal_performance_shaders_graph::{MPSGraph, MPSGraphDevice, MPSGraphTensorData};
 use set_vision_contract::{
-    ATTRIBUTE_COUNT, ATTRIBUTE_VALUE_COUNT, CARD_HEIGHT, CARD_WIDTH, CHANNELS,
+    ATTRIBUTE_COUNT, ATTRIBUTE_VALUE_COUNT, CARD_HEIGHT, CARD_WIDTH, CHANNELS, RELATION_CLASS_COUNT,
 };
 use set_vision_data::{AtlasCollection, Batch, Rng};
 
@@ -32,12 +32,14 @@ struct TrainConfig {
     augment: bool,
     data_seed: u64,
     init_seed: u64,
+    typed_relations: bool,
 }
 
 struct PreparedBatch {
     pixels: Vec<f32>,
     set_labels: Vec<f32>,
     attribute_labels: Vec<f32>,
+    relation_labels: Vec<f32>,
 }
 
 struct AdamW {
@@ -189,6 +191,7 @@ fn prepare_batch(batch: &Batch) -> PreparedBatch {
         pixels: cards_nchw(&batch.pixels),
         set_labels: binary_one_hot(&batch.set_targets),
         attribute_labels: attribute_one_hot(&batch.attribute_targets),
+        relation_labels: attribute_one_hot(&batch.relation_targets),
     }
 }
 
@@ -201,6 +204,7 @@ fn run_policy(
         policy.pixels.clone(),
         policy.set_labels.clone(),
         policy.attribute_labels.clone(),
+        policy.relation_labels.clone(),
     ];
     feed_tensors.extend(
         policy
@@ -226,6 +230,14 @@ fn run_policy(
             &[
                 policy_graph::BATCH_SIZE * 3 * ATTRIBUTE_COUNT,
                 ATTRIBUTE_VALUE_COUNT,
+            ],
+        ),
+        tensor_data(
+            device,
+            &batch.relation_labels,
+            &[
+                policy_graph::BATCH_SIZE * ATTRIBUTE_COUNT,
+                RELATION_CLASS_COUNT,
             ],
         ),
     ];
@@ -280,6 +292,7 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
         augment: true,
         data_seed: DEFAULT_DATA_SEED,
         init_seed: DEFAULT_INIT_SEED,
+        typed_relations: false,
     };
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -301,6 +314,7 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
                 ));
             }
             "--no-augment" => config.augment = false,
+            "--typed-relations" => config.typed_relations = true,
             "--data-seed" => {
                 config.data_seed = arguments
                     .next()
@@ -315,7 +329,7 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
             }
             unknown => {
                 return Err(format!(
-                    "unknown argument {unknown}; usage: [--steps N] [--output PATH] [--atlas-dir PATH] [--no-augment] [--data-seed N] [--init-seed N]"
+                    "unknown argument {unknown}; usage: [--steps N] [--output PATH] [--atlas-dir PATH] [--no-augment] [--typed-relations] [--data-seed N] [--init-seed N]"
                 )
                 .into());
             }
@@ -448,7 +462,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("data_seed: {}", config.data_seed);
     println!("init_seed: {}", config.init_seed);
-    let mut policy = policy_graph::PolicyGraph::new(config.init_seed);
+    let mut policy = policy_graph::PolicyGraph::new(config.init_seed, config.typed_relations);
+    println!("typed_relations: {}", config.typed_relations);
     let parameter_count = policy
         .parameters
         .iter()

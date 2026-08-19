@@ -5,7 +5,7 @@ use ft_autograd::{AutogradError, TensorNodeId};
 use ft_nn::{Conv2d, Linear, Module};
 pub use set_vision_contract::{
     ATTRIBUTE_COUNT, ATTRIBUTE_LOGITS, ATTRIBUTE_VALUE_COUNT, CARD_HEIGHT, CARD_PIXELS, CARD_WIDTH,
-    CHANNELS,
+    CHANNELS, RELATION_CLASS_COUNT,
 };
 use std::fmt;
 
@@ -33,6 +33,18 @@ pub struct BoardDecision {
     pub score_margin: f64,
     pub mean_attribute_entropy: f64,
     pub min_attribute_margin: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawBoardAction {
+    Set([usize; 3]),
+    NoSet,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RawBoardDecision {
+    pub action: RawBoardAction,
+    pub strongest_triple: BoardDecision,
 }
 
 impl BoardScores {
@@ -88,6 +100,22 @@ impl BoardScores {
             score_margin: score - runner_up_score,
             mean_attribute_entropy: entropy_total / f64::from(attribute_count),
             min_attribute_margin,
+        })
+    }
+
+    /// Chooses from the complete raw action space. `NoSet` is a supervised
+    /// game action, not an abstention: non-negative logits denote a predicted
+    /// SET and negative logits denote that every enumerated triple is invalid.
+    pub fn best_raw_decision(&self) -> Option<RawBoardDecision> {
+        let strongest_triple = self.best_decision()?;
+        let action = if strongest_triple.score >= 0.0 {
+            RawBoardAction::Set(strongest_triple.triple)
+        } else {
+            RawBoardAction::NoSet
+        };
+        Some(RawBoardDecision {
+            action,
+            strongest_triple,
         })
     }
 }
@@ -292,7 +320,7 @@ impl Module for ResearchAttributeHead {
 /// Shared topology-independent implementation for the deployed and research
 /// policy wrappers. The wrapper's attribute-head type determines the exported
 /// state-dict key family, so strict loading cannot silently mix topologies.
-struct PolicyCore<H> {
+struct PolicyCore<H, const RELATION_CLASSES: usize> {
     shared_convolution: Conv2d,
     attribute_heads: [H; ATTRIBUTE_COUNT],
     attribute_relation_in: Linear,
@@ -301,7 +329,7 @@ struct PolicyCore<H> {
     set_relation_out: Linear,
 }
 
-impl<H: Module> PolicyCore<H> {
+impl<H: Module, const RELATION_CLASSES: usize> PolicyCore<H, RELATION_CLASSES> {
     fn new<F>(session: &mut FrankenTorchSession, mut head_new: F) -> Result<Self, AutogradError>
     where
         F: FnMut(&mut FrankenTorchSession) -> Result<H, AutogradError>,
@@ -328,8 +356,18 @@ impl<H: Module> PolicyCore<H> {
                 ATTRIBUTE_RELATION_DIM,
                 true,
             )?,
-            attribute_relation_out: Linear::new(session, ATTRIBUTE_RELATION_DIM, 1, true)?,
-            set_relation_in: Linear::new(session, ATTRIBUTE_COUNT, RELATION_DIM, true)?,
+            attribute_relation_out: Linear::new(
+                session,
+                ATTRIBUTE_RELATION_DIM,
+                RELATION_CLASSES,
+                true,
+            )?,
+            set_relation_in: Linear::new(
+                session,
+                ATTRIBUTE_COUNT * RELATION_CLASSES,
+                RELATION_DIM,
+                true,
+            )?,
             set_relation_out: Linear::new(session, RELATION_DIM, 1, true)?,
         })
     }
@@ -346,8 +384,26 @@ impl<H: Module> PolicyCore<H> {
             vec![batch_size, 3, ATTRIBUTE_COUNT, ATTRIBUTE_VALUE_COUNT],
         )?;
         let attribute_probabilities = session.tensor_softmax(attribute_probabilities, 3)?;
-        let set_logits = self.forward_relation(session, attribute_probabilities, batch_size)?;
+        let (set_logits, _) =
+            self.forward_relation_with_types(session, attribute_probabilities, batch_size)?;
         Ok((set_logits, attribute_logits))
+    }
+
+    fn forward_with_relations(
+        &self,
+        session: &mut FrankenTorchSession,
+        input: TensorNodeId,
+    ) -> Result<(TensorNodeId, TensorNodeId, TensorNodeId), AutogradError> {
+        let batch_size = session.tensor_shape(input)?[0];
+        let attribute_logits = self.attribute_logits(session, input)?;
+        let attribute_probabilities = session.tensor_reshape(
+            attribute_logits,
+            vec![batch_size, 3, ATTRIBUTE_COUNT, ATTRIBUTE_VALUE_COUNT],
+        )?;
+        let attribute_probabilities = session.tensor_softmax(attribute_probabilities, 3)?;
+        let (set_logits, relation_logits) =
+            self.forward_relation_with_types(session, attribute_probabilities, batch_size)?;
+        Ok((set_logits, attribute_logits, relation_logits))
     }
 
     /// Encodes any number of cards once. Browser inference uses this before
@@ -380,12 +436,12 @@ impl<H: Module> PolicyCore<H> {
         self.attribute_logits_for_cards(session, input, batch_size * 3)
     }
 
-    fn forward_relation(
+    fn forward_relation_with_types(
         &self,
         session: &mut FrankenTorchSession,
         attribute_probabilities: TensorNodeId,
         batch_size: usize,
-    ) -> Result<TensorNodeId, AutogradError> {
+    ) -> Result<(TensorNodeId, TensorNodeId), AutogradError> {
         let relation = session.tensor_sum_dim(attribute_probabilities, 1)?;
         let relation = session.tensor_reshape(
             relation,
@@ -393,11 +449,23 @@ impl<H: Module> PolicyCore<H> {
         )?;
         let relation = self.attribute_relation_in.forward(session, relation)?;
         let relation = session.tensor_gelu(relation)?;
-        let relation = self.attribute_relation_out.forward(session, relation)?;
-        let relation = session.tensor_reshape(relation, vec![batch_size, ATTRIBUTE_COUNT])?;
-        let relation = self.set_relation_in.forward(session, relation)?;
+        let relation_logits = self.attribute_relation_out.forward(session, relation)?;
+        let relation_features = if RELATION_CLASSES == 1 {
+            session.tensor_reshape(
+                relation_logits,
+                vec![batch_size, ATTRIBUTE_COUNT * RELATION_CLASSES],
+            )?
+        } else {
+            let probabilities = session.tensor_softmax(relation_logits, 1)?;
+            session.tensor_reshape(
+                probabilities,
+                vec![batch_size, ATTRIBUTE_COUNT * RELATION_CLASSES],
+            )?
+        };
+        let relation = self.set_relation_in.forward(session, relation_features)?;
         let relation = session.tensor_gelu(relation)?;
-        self.set_relation_out.forward(session, relation)
+        let set_logits = self.set_relation_out.forward(session, relation)?;
+        Ok((set_logits, relation_logits))
     }
 
     /// Scores every three-card action after encoding each board card exactly once.
@@ -452,7 +520,8 @@ impl<H: Module> PolicyCore<H> {
             vec![triple_count, 3, ATTRIBUTE_COUNT, ATTRIBUTE_VALUE_COUNT],
             false,
         )?;
-        let scores = self.forward_relation(session, relation_input, triple_count)?;
+        let (scores, _) =
+            self.forward_relation_with_types(session, relation_input, triple_count)?;
         Ok(BoardScores {
             triples,
             scores: session.tensor_values(scores)?,
@@ -461,7 +530,7 @@ impl<H: Module> PolicyCore<H> {
     }
 }
 
-impl<H: Module> Module for PolicyCore<H> {
+impl<H: Module, const RELATION_CLASSES: usize> Module for PolicyCore<H, RELATION_CLASSES> {
     fn forward(
         &self,
         session: &mut FrankenTorchSession,
@@ -506,7 +575,7 @@ impl<H: Module> Module for PolicyCore<H> {
 /// `attribute_head_N.convolution.*` keys and the original single-convolution
 /// specialist topology.
 pub struct DeployedVisualSetPolicy {
-    core: PolicyCore<DeployedAttributeHead>,
+    core: PolicyCore<DeployedAttributeHead, 1>,
 }
 
 impl fmt::Debug for DeployedVisualSetPolicy {
@@ -568,7 +637,68 @@ impl Module for DeployedVisualSetPolicy {
 /// `attribute_head_N.local_convolution.*` and
 /// `attribute_head_N.dilated_residual_convolution.*` keys.
 pub struct ResearchVisualSetPolicy {
-    core: PolicyCore<ResearchAttributeHead>,
+    core: PolicyCore<ResearchAttributeHead, 1>,
+}
+
+/// V9 research policy with explicit `same`, `different`, and `invalid`
+/// supervision for each of the four card attributes. Its typed relation
+/// probabilities feed the final SET scorer without a discrete operation in
+/// the training graph.
+pub struct TypedRelationResearchPolicy {
+    core: PolicyCore<ResearchAttributeHead, RELATION_CLASS_COUNT>,
+}
+
+impl fmt::Debug for TypedRelationResearchPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TypedRelationResearchPolicy")
+            .field("input", &(CARD_HEIGHT, CARD_WIDTH, CHANNELS))
+            .field("relation_classes", &RELATION_CLASS_COUNT)
+            .finish_non_exhaustive()
+    }
+}
+
+impl TypedRelationResearchPolicy {
+    pub fn new(session: &mut FrankenTorchSession) -> Result<Self, AutogradError> {
+        Ok(Self {
+            core: PolicyCore::new(session, ResearchAttributeHead::new)?,
+        })
+    }
+
+    pub fn forward_with_relations(
+        &self,
+        session: &mut FrankenTorchSession,
+        input: TensorNodeId,
+    ) -> Result<(TensorNodeId, TensorNodeId, TensorNodeId), AutogradError> {
+        self.core.forward_with_relations(session, input)
+    }
+
+    pub fn score_board(
+        &self,
+        session: &mut FrankenTorchSession,
+        pixels: Vec<f64>,
+        card_count: usize,
+    ) -> Result<BoardScores, PolicyError> {
+        self.core.score_board(session, pixels, card_count)
+    }
+}
+
+impl Module for TypedRelationResearchPolicy {
+    fn forward(
+        &self,
+        session: &mut FrankenTorchSession,
+        input: TensorNodeId,
+    ) -> Result<TensorNodeId, AutogradError> {
+        self.core.forward(session, input)
+    }
+
+    fn parameters(&self) -> Vec<TensorNodeId> {
+        self.core.parameters()
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module)> {
+        self.core.named_children()
+    }
 }
 
 impl fmt::Debug for ResearchVisualSetPolicy {
@@ -634,7 +764,7 @@ mod tests {
 
     use super::{
         ATTRIBUTE_COUNT, BoardScores, CARD_PIXELS, DeployedVisualSetPolicy, PolicyError,
-        ResearchVisualSetPolicy,
+        RawBoardAction, ResearchVisualSetPolicy, TypedRelationResearchPolicy,
     };
 
     #[test]
@@ -649,6 +779,34 @@ mod tests {
         assert!((decision.score_margin - 0.75).abs() < 1.0e-12);
         assert!(decision.mean_attribute_entropy < 0.001);
         assert!(decision.min_attribute_margin > 0.999);
+    }
+
+    #[test]
+    fn raw_decision_uses_no_set_as_a_real_action_below_zero() {
+        let attributes = (0..4).flat_map(|_| [8.0, -4.0, -4.0].repeat(4));
+        let no_set_scores = BoardScores {
+            triples: vec![[0, 1, 2], [0, 1, 3]],
+            scores: vec![-0.25, -0.75],
+            attribute_logits: attributes.collect(),
+        };
+        assert_eq!(
+            no_set_scores
+                .best_raw_decision()
+                .map(|decision| decision.action),
+            Some(RawBoardAction::NoSet)
+        );
+
+        let set_scores = BoardScores {
+            triples: no_set_scores.triples,
+            scores: vec![0.25, -0.75],
+            attribute_logits: no_set_scores.attribute_logits,
+        };
+        assert_eq!(
+            set_scores
+                .best_raw_decision()
+                .map(|decision| decision.action),
+            Some(RawBoardAction::Set([0, 1, 2]))
+        );
     }
 
     #[test]
@@ -749,6 +907,16 @@ mod tests {
         assert!(
             mismatch
                 .load_state_dict(&mut mismatch_session, &research_state, true)
+                .is_err()
+        );
+
+        let mut typed_session = FrankenTorchSession::new(ExecutionMode::Strict);
+        let typed = TypedRelationResearchPolicy::new(&mut typed_session)?;
+        let typed_state = typed.state_dict(&typed_session)?;
+        assert_eq!(typed.parameters().len(), research.parameters().len());
+        assert!(
+            research
+                .load_state_dict(&mut research_session, &typed_state, true)
                 .is_err()
         );
         Ok(())

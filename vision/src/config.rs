@@ -19,6 +19,7 @@ pub(crate) struct TrainConfig {
     pub(crate) batch_size: usize,
     pub(crate) learning_rate: f64,
     pub(crate) attribute_loss_weight: f64,
+    pub(crate) relation_loss_weight: f64,
     pub(crate) seed: u64,
     pub(crate) eval_only: bool,
     pub(crate) probe_only: bool,
@@ -27,6 +28,8 @@ pub(crate) struct TrainConfig {
     pub(crate) triple_seed: u64,
     pub(crate) board_seed: u64,
     pub(crate) augment: bool,
+    pub(crate) typed_relations: bool,
+    pub(crate) mixed_boards: bool,
 }
 
 impl Default for TrainConfig {
@@ -49,6 +52,7 @@ impl Default for TrainConfig {
             batch_size: 64,
             learning_rate: 8.0e-4,
             attribute_loss_weight: 0.35,
+            relation_loss_weight: 1.0,
             seed: 0x5e7_2026,
             eval_only: false,
             probe_only: false,
@@ -57,6 +61,8 @@ impl Default for TrainConfig {
             triple_seed: DEFAULT_TRIPLE_SEED,
             board_seed: DEFAULT_BOARD_SEED,
             augment: true,
+            typed_relations: false,
+            mixed_boards: false,
         }
     }
 }
@@ -78,6 +84,9 @@ impl TrainConfig {
                 "--attribute-loss-weight" => {
                     config.attribute_loss_weight = parse_value(&mut args, &flag)?;
                 }
+                "--relation-loss-weight" => {
+                    config.relation_loss_weight = parse_value(&mut args, &flag)?;
+                }
                 "--seed" => config.seed = parse_value(&mut args, &flag)?,
                 "--eval-only" => config.eval_only = true,
                 "--probe-only" => config.probe_only = true,
@@ -86,6 +95,8 @@ impl TrainConfig {
                 "--triple-seed" => config.triple_seed = parse_value(&mut args, &flag)?,
                 "--board-seed" => config.board_seed = parse_value(&mut args, &flag)?,
                 "--no-augment" => config.augment = false,
+                "--typed-relations" => config.typed_relations = true,
+                "--mixed-boards" => config.mixed_boards = true,
                 "--atlas-dir" => config.atlas_dir = PathBuf::from(next_value(&mut args, &flag)?),
                 "--validation-atlas-dir" => {
                     config.validation_atlas_dir = PathBuf::from(next_value(&mut args, &flag)?);
@@ -131,7 +142,10 @@ impl TrainConfig {
         {
             return Err("step, batch, and evaluation counts must be positive".to_string());
         }
-        if config.learning_rate <= 0.0 || config.attribute_loss_weight < 0.0 {
+        if config.learning_rate <= 0.0
+            || config.attribute_loss_weight < 0.0
+            || config.relation_loss_weight < 0.0
+        {
             return Err("learning rate must be positive and loss weights non-negative".to_string());
         }
         config.validate_ensemble_options()?;
@@ -230,6 +244,7 @@ impl TrainConfig {
     pub(crate) fn usage() -> &'static str {
         "Usage: cargo run --release -- [--steps N] [--batch-size N] \
          [--learning-rate RATE] [--attribute-loss-weight WEIGHT] [--seed N] [--atlas-dir PATH] \
+         [--relation-loss-weight WEIGHT] [--typed-relations] [--mixed-boards] \
          [--validation-atlas-dir PATH] [--output-dir PATH] [--eval-only] \
          [--ensemble-output-dir PATH] \
          [--ensemble-third-output-dir PATH] \
@@ -321,6 +336,25 @@ mod tests {
         assert_eq!(config.board_seed, 987_654_321);
         assert_eq!(config.eval_batches, 32);
         assert_eq!(config.eval_boards, 32);
+    }
+
+    #[test]
+    fn typed_relation_and_mixed_board_modes_are_explicit() {
+        let args = [
+            "--typed-relations",
+            "--mixed-boards",
+            "--relation-loss-weight",
+            "1.5",
+        ]
+        .into_iter()
+        .map(str::to_string);
+        let config = TrainConfig::from_iter(args)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        assert!(config.typed_relations);
+        assert!(config.mixed_boards);
+        assert!((config.relation_loss_weight - 1.5).abs() < f64::EPSILON);
     }
 
     #[test]

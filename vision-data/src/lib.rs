@@ -1,6 +1,9 @@
 use std::{collections::BTreeMap, fs::File, io::BufReader, path::Path};
 
 use set_vision_contract::{CARD_HEIGHT, CARD_PIXELS, CARD_WIDTH, CHANNELS};
+pub use set_vision_contract::{
+    RELATION_CLASS_COUNT, RELATION_DIFFERENT, RELATION_INVALID, RELATION_SAME,
+};
 
 const ATLAS_COLUMNS: usize = 9;
 const ATLAS_ROWS: usize = 9;
@@ -17,7 +20,14 @@ pub struct Batch {
     pub pixels: Vec<f64>,
     pub set_targets: Vec<f64>,
     pub attribute_targets: Vec<f64>,
+    pub relation_targets: Vec<f64>,
     pub atlas_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardKind {
+    HasSet,
+    NoSet,
 }
 
 #[derive(Debug)]
@@ -26,6 +36,7 @@ pub struct BoardBatch {
     pub set_targets: Vec<f64>,
     pub ids: Vec<usize>,
     pub atlas_index: usize,
+    pub kind: BoardKind,
 }
 
 #[derive(Debug)]
@@ -127,6 +138,7 @@ impl AtlasCollection {
         let mut pixels = Vec::with_capacity(size * 3 * CARD_PIXELS);
         let mut set_targets = Vec::with_capacity(size);
         let mut attribute_targets = Vec::with_capacity(size * 3 * 4);
+        let mut relation_targets = Vec::with_capacity(size * 4);
         let mut atlas_indices = Vec::with_capacity(size);
         let seed_offset = if seed_stratified { rng.next_u64() } else { 0 };
 
@@ -158,6 +170,7 @@ impl AtlasCollection {
                 append_card(&mut pixels, &self.cards[theme][id], rng, augment);
                 attribute_targets.extend(decode_card(id).map(|value| ATTRIBUTE_VALUES[value]));
             }
+            relation_targets.extend(relation_targets_for_triple(ids));
             set_targets.push(f64::from(is_set));
         }
 
@@ -165,11 +178,21 @@ impl AtlasCollection {
             pixels,
             set_targets,
             attribute_targets,
+            relation_targets,
             atlas_indices,
         }
     }
 
     pub fn make_board(&self, rng: &mut Rng, card_count: usize) -> BoardBatch {
+        self.make_board_of_kind(rng, card_count, BoardKind::HasSet)
+    }
+
+    pub fn make_board_of_kind(
+        &self,
+        rng: &mut Rng,
+        card_count: usize,
+        kind: BoardKind,
+    ) -> BoardBatch {
         let ids = loop {
             let mut deck = (0..DECK_SIZE).collect::<Vec<_>>();
             for index in 0..card_count {
@@ -177,7 +200,8 @@ impl AtlasCollection {
                 deck.swap(index, replacement);
             }
             deck.truncate(card_count);
-            if board_has_set(&deck) {
+            let has_set = board_has_set(&deck);
+            if has_set == (kind == BoardKind::HasSet) {
                 break deck;
             }
         };
@@ -202,6 +226,7 @@ impl AtlasCollection {
             set_targets,
             ids,
             atlas_index: theme,
+            kind,
         }
     }
 
@@ -261,6 +286,25 @@ fn board_has_set(ids: &[usize]) -> bool {
         }
     }
     false
+}
+
+pub fn relation_targets_for_triple(ids: [usize; 3]) -> [f64; 4] {
+    let attributes = ids.map(decode_card);
+    std::array::from_fn(|attribute| {
+        let values = [
+            attributes[0][attribute],
+            attributes[1][attribute],
+            attributes[2][attribute],
+        ];
+        let relation = if values[0] == values[1] && values[1] == values[2] {
+            RELATION_SAME
+        } else if values[0] != values[1] && values[0] != values[2] && values[1] != values[2] {
+            RELATION_DIFFERENT
+        } else {
+            RELATION_INVALID
+        };
+        f64::from(relation)
+    })
 }
 
 fn load_atlas(path: &Path) -> Result<Vec<Vec<f64>>, Box<dyn std::error::Error>> {
@@ -699,9 +743,10 @@ impl Rng {
 #[cfg(test)]
 mod tests {
     use super::{
-        AtlasCollection, AugmentationPlan, CARD_HEIGHT, CARD_PIXELS, CARD_WIDTH, DECK_SIZE, Rng,
-        append_card, area_resample_rgb, atlas_device_scale, atlas_sampling_keys, atlas_seed_key,
-        board_has_set, completing_card, decode_card, hard_negative_triple,
+        AtlasCollection, AugmentationPlan, BoardKind, CARD_HEIGHT, CARD_PIXELS, CARD_WIDTH,
+        DECK_SIZE, RELATION_DIFFERENT, RELATION_INVALID, RELATION_SAME, Rng, append_card,
+        area_resample_rgb, atlas_device_scale, atlas_sampling_keys, atlas_seed_key, board_has_set,
+        completing_card, decode_card, hard_negative_triple, relation_targets_for_triple,
         sample_seed_stratified_atlas,
     };
 
@@ -743,6 +788,7 @@ mod tests {
         assert_eq!(legacy.pixels, explicit_legacy.pixels);
         assert_eq!(legacy.set_targets, explicit_legacy.set_targets);
         assert_eq!(legacy.attribute_targets, explicit_legacy.attribute_targets);
+        assert_eq!(legacy.relation_targets, explicit_legacy.relation_targets);
         assert_eq!(legacy.atlas_indices, explicit_legacy.atlas_indices);
     }
 
@@ -841,6 +887,40 @@ mod tests {
     fn board_set_detection_distinguishes_known_examples() {
         assert!(board_has_set(&[0, 1, 2]));
         assert!(!board_has_set(&[0, 1, 3]));
+    }
+
+    #[test]
+    fn relation_targets_distinguish_same_different_and_invalid() {
+        assert_eq!(
+            relation_targets_for_triple([0, 1, 2]),
+            [
+                f64::from(RELATION_SAME),
+                f64::from(RELATION_SAME),
+                f64::from(RELATION_SAME),
+                f64::from(RELATION_DIFFERENT),
+            ]
+        );
+        assert_eq!(
+            relation_targets_for_triple([0, 1, 3]),
+            [
+                f64::from(RELATION_SAME),
+                f64::from(RELATION_SAME),
+                f64::from(RELATION_INVALID),
+                f64::from(RELATION_INVALID),
+            ]
+        );
+    }
+
+    #[test]
+    fn board_sampler_can_require_or_forbid_an_answer() {
+        let collection = fixture_collection();
+        let mut rng = Rng::new(0xb0a4_d009);
+        let solvable = collection.make_board_of_kind(&mut rng, 12, BoardKind::HasSet);
+        let unsolvable = collection.make_board_of_kind(&mut rng, 12, BoardKind::NoSet);
+        assert!(board_has_set(&solvable.ids));
+        assert!(!board_has_set(&unsolvable.ids));
+        assert_eq!(solvable.kind, BoardKind::HasSet);
+        assert_eq!(unsolvable.kind, BoardKind::NoSet);
     }
 
     #[test]

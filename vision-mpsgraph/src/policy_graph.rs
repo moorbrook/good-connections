@@ -6,7 +6,7 @@ use objc2_metal_performance_shaders_graph::{
     MPSGraphTensor, MPSGraphTensorNamedDataLayout,
 };
 use set_vision_contract::{
-    ATTRIBUTE_COUNT, ATTRIBUTE_VALUE_COUNT, CARD_HEIGHT, CARD_WIDTH, CHANNELS,
+    ATTRIBUTE_COUNT, ATTRIBUTE_VALUE_COUNT, CARD_HEIGHT, CARD_WIDTH, CHANNELS, RELATION_CLASS_COUNT,
 };
 
 use crate::shape;
@@ -30,6 +30,7 @@ pub struct PolicyGraph {
     pub pixels: Retained<MPSGraphTensor>,
     pub set_labels: Retained<MPSGraphTensor>,
     pub attribute_labels: Retained<MPSGraphTensor>,
+    pub relation_labels: Retained<MPSGraphTensor>,
     pub loss: Retained<MPSGraphTensor>,
     pub parameters: Vec<Parameter>,
     pub gradients: Vec<Retained<MPSGraphTensor>>,
@@ -219,12 +220,14 @@ impl Builder {
 }
 
 impl PolicyGraph {
-    pub fn new(init_seed: u64) -> Self {
+    pub fn new(init_seed: u64, typed_relations: bool) -> Self {
         let mut builder = Builder::new(init_seed);
         let pixels = builder.placeholder(&[CARD_COUNT, CHANNELS, CARD_HEIGHT, CARD_WIDTH]);
         let set_labels = builder.placeholder(&[BATCH_SIZE, 2]);
         let attribute_labels =
             builder.placeholder(&[BATCH_SIZE * 3 * ATTRIBUTE_COUNT, ATTRIBUTE_VALUE_COUNT]);
+        let relation_labels =
+            builder.placeholder(&[BATCH_SIZE * ATTRIBUTE_COUNT, RELATION_CLASS_COUNT]);
 
         let shared = builder.convolution(
             "shared_convolution",
@@ -326,9 +329,32 @@ impl PolicyGraph {
             32,
         );
         let relation = builder.activation(&relation);
-        let relation = builder.linear("attribute_relation_out", &relation, 32, 1);
-        let relation = builder.reshape(&relation, &[BATCH_SIZE, ATTRIBUTE_COUNT]);
-        let relation = builder.linear("set_relation_in", &relation, ATTRIBUTE_COUNT, 16);
+        let relation_classes = if typed_relations {
+            RELATION_CLASS_COUNT
+        } else {
+            1
+        };
+        let relation_logits =
+            builder.linear("attribute_relation_out", &relation, 32, relation_classes);
+        let relation_features = if typed_relations {
+            let probabilities = unsafe {
+                builder
+                    .graph
+                    .softMaxWithTensor_axis_name(&relation_logits, 1, None)
+            };
+            builder.reshape(
+                &probabilities,
+                &[BATCH_SIZE, ATTRIBUTE_COUNT * RELATION_CLASS_COUNT],
+            )
+        } else {
+            builder.reshape(&relation_logits, &[BATCH_SIZE, ATTRIBUTE_COUNT])
+        };
+        let relation = builder.linear(
+            "set_relation_in",
+            &relation_features,
+            ATTRIBUTE_COUNT * relation_classes,
+            16,
+        );
         let relation = builder.activation(&relation);
         let set_logits = builder.linear("set_relation_out", &relation, 16, 1);
         let zero_logits = unsafe {
@@ -356,7 +382,21 @@ impl PolicyGraph {
                 .constantWithScalar_dataType(4.0, MPSDataType::Float32)
         };
         let weighted_attributes = builder.mul(&attribute_loss, &weight);
-        let loss = builder.add(&set_loss, &weighted_attributes);
+        let mut loss = builder.add(&set_loss, &weighted_attributes);
+        if typed_relations {
+            let relation_loss = unsafe {
+                builder
+                    .graph
+                    .softMaxCrossEntropyWithSourceTensor_labelsTensor_axis_reductionType_name(
+                        &relation_logits,
+                        &relation_labels,
+                        1,
+                        MPSGraphLossReductionType::Mean,
+                        None,
+                    )
+            };
+            loss = builder.add(&loss, &relation_loss);
+        }
 
         let parameter_tensors = builder
             .parameters
@@ -386,6 +426,7 @@ impl PolicyGraph {
             pixels,
             set_labels,
             attribute_labels,
+            relation_labels,
             loss,
             parameters: builder.parameters,
             gradients,
