@@ -8,6 +8,7 @@ pub(crate) struct TrainConfig {
     pub(crate) atlas_dir: PathBuf,
     pub(crate) validation_atlas_dir: PathBuf,
     pub(crate) output_dir: PathBuf,
+    pub(crate) ensemble_output_dir: Option<PathBuf>,
     pub(crate) steps: usize,
     pub(crate) batch_size: usize,
     pub(crate) learning_rate: f64,
@@ -31,6 +32,7 @@ impl Default for TrainConfig {
             atlas_dir: root.join("vision-artifacts/atlases"),
             validation_atlas_dir: root.join("vision-artifacts/validation-atlases"),
             output_dir: root.join("vision-artifacts/model"),
+            ensemble_output_dir: None,
             steps: 10_000,
             batch_size: 64,
             learning_rate: 8.0e-4,
@@ -77,6 +79,9 @@ impl TrainConfig {
                     config.validation_atlas_dir = PathBuf::from(next_value(&mut args, &flag)?);
                 }
                 "--output-dir" => config.output_dir = PathBuf::from(next_value(&mut args, &flag)?),
+                "--ensemble-output-dir" => {
+                    config.ensemble_output_dir = Some(PathBuf::from(next_value(&mut args, &flag)?));
+                }
                 unknown => return Err(format!("unknown argument: {unknown}")),
             }
         }
@@ -90,6 +95,12 @@ impl TrainConfig {
         if config.learning_rate <= 0.0 || config.attribute_loss_weight < 0.0 {
             return Err("learning rate must be positive and loss weights non-negative".to_string());
         }
+        if config.ensemble_output_dir.is_some() && (!config.eval_only || config.probe_only) {
+            return Err(
+                "--ensemble-output-dir requires --eval-only and is unavailable with --probe-only"
+                    .to_string(),
+            );
+        }
         Ok(Some(config))
     }
 
@@ -97,6 +108,7 @@ impl TrainConfig {
         "Usage: cargo run --release -- [--steps N] [--batch-size N] \
          [--learning-rate RATE] [--attribute-loss-weight WEIGHT] [--seed N] [--atlas-dir PATH] \
          [--validation-atlas-dir PATH] [--output-dir PATH] [--eval-only] \
+         [--ensemble-output-dir PATH] \
          [--probe-only] \
          [--eval-batches N] [--eval-boards N] [--triple-seed N] [--board-seed N] \
          [--no-augment]"
@@ -120,6 +132,8 @@ fn parse_value<T: std::str::FromStr>(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::{DEFAULT_BOARD_SEED, DEFAULT_TRIPLE_SEED, TrainConfig};
 
     #[test]
@@ -150,5 +164,42 @@ mod tests {
         assert_eq!(config.board_seed, 987_654_321);
         assert_eq!(config.eval_batches, 32);
         assert_eq!(config.eval_boards, 32);
+    }
+
+    #[test]
+    fn ensemble_output_dir_parses_for_eval_only() {
+        let args = [
+            "--eval-only",
+            "--ensemble-output-dir",
+            "/tmp/second-checkpoint",
+        ]
+        .into_iter()
+        .map(str::to_string);
+        let config = TrainConfig::from_iter(args)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+
+        assert_eq!(
+            config.ensemble_output_dir,
+            Some(PathBuf::from("/tmp/second-checkpoint"))
+        );
+    }
+
+    #[test]
+    fn ensemble_output_dir_requires_eval_only() {
+        let args = ["--ensemble-output-dir", "/tmp/second-checkpoint"]
+            .into_iter()
+            .map(str::to_string);
+        assert!(TrainConfig::from_iter(args).is_err());
+
+        let args = [
+            "--probe-only",
+            "--ensemble-output-dir",
+            "/tmp/second-checkpoint",
+        ]
+        .into_iter()
+        .map(str::to_string);
+        assert!(TrainConfig::from_iter(args).is_err());
     }
 }

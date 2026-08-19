@@ -8,7 +8,7 @@ use ft_core::ExecutionMode;
 use ft_nn::{BCEWithLogitsLoss, CrossEntropyLoss, LossModule, Module};
 use ft_optim::{AdamW, Optimizer};
 use set_vision_data::{AtlasCollection, Rng, decode_card};
-use set_vision_policy::{BoardDecision, CARD_PIXELS, VisualSetPolicy};
+use set_vision_policy::{BoardDecision, BoardScores, CARD_PIXELS, VisualSetPolicy};
 use std::io::Write;
 
 #[allow(clippy::too_many_lines)]
@@ -37,6 +37,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("checkpoint: {}", checkpoint.display());
     }
     let graph_boundary = session.autograd_graph_node_count();
+    let mut ensemble = if let Some(output_dir) = config.ensemble_output_dir.as_ref() {
+        let mut ensemble_session = FrankenTorchSession::new(ExecutionMode::Strict);
+        let ensemble_model = VisualSetPolicy::new(&mut ensemble_session)?;
+        let checkpoint = output_dir.join("set-vision.ftsv");
+        let state = ft_serialize::load_state_dict(&checkpoint)?;
+        ensemble_model.load_state_dict(&mut ensemble_session, &state, true)?;
+        let graph_boundary = ensemble_session.autograd_graph_node_count();
+        println!("ensemble_checkpoint: {}", checkpoint.display());
+        Some(EnsemblePolicy {
+            session: ensemble_session,
+            model: ensemble_model,
+            graph_boundary,
+        })
+    } else {
+        None
+    };
 
     if config.probe_only {
         let atlases = atlases.as_ref().ok_or("probe requires an atlas corpus")?;
@@ -119,6 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let evaluation = evaluate(
         &mut session,
         &model,
+        ensemble.as_mut(),
         &validation_atlases,
         graph_boundary,
         config.eval_batches,
@@ -167,6 +184,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+struct EnsemblePolicy {
+    session: FrankenTorchSession,
+    model: VisualSetPolicy,
+    graph_boundary: usize,
+}
+
 #[derive(Debug)]
 struct Evaluation {
     triple_accuracy: f64,
@@ -202,6 +225,7 @@ struct AtlasEvaluation {
 fn evaluate(
     session: &mut FrankenTorchSession,
     model: &VisualSetPolicy,
+    mut ensemble: Option<&mut EnsemblePolicy>,
     atlases: &AtlasCollection,
     graph_boundary: usize,
     batches: usize,
@@ -223,20 +247,48 @@ fn evaluate(
     let mut triple_rng = Rng::new(triple_seed);
     let mut board_rng = Rng::new(board_seed);
     session.no_grad_enter();
+    if let Some(ensemble) = ensemble.as_deref_mut() {
+        ensemble.session.no_grad_enter();
+    }
     for _ in 0..batches {
         let batch = atlases.make_batch(&mut triple_rng, BATCH_SIZE, false);
-        let input =
-            session.tensor_variable(batch.pixels, vec![BATCH_SIZE, 3, CARD_PIXELS], false)?;
-        let (set_logits, attribute_logits) = model.forward_with_attributes(session, input)?;
-        for (logit, target) in session
-            .tensor_values(set_logits)?
-            .iter()
-            .zip(batch.set_targets)
-        {
+        let (set_values, attribute_values) = if let Some(ensemble) = ensemble.as_deref_mut() {
+            let input = session.tensor_variable(
+                batch.pixels.clone(),
+                vec![BATCH_SIZE, 3, CARD_PIXELS],
+                false,
+            )?;
+            let (set_logits, attribute_logits) = model.forward_with_attributes(session, input)?;
+            let ensemble_input = ensemble.session.tensor_variable(
+                batch.pixels,
+                vec![BATCH_SIZE, 3, CARD_PIXELS],
+                false,
+            )?;
+            let (ensemble_set_logits, ensemble_attribute_logits) = ensemble
+                .model
+                .forward_with_attributes(&mut ensemble.session, ensemble_input)?;
+            let set_values = average_logits(
+                &session.tensor_values(set_logits)?,
+                &ensemble.session.tensor_values(ensemble_set_logits)?,
+            )?;
+            let attribute_values = average_logits(
+                &session.tensor_values(attribute_logits)?,
+                &ensemble.session.tensor_values(ensemble_attribute_logits)?,
+            )?;
+            (set_values, attribute_values)
+        } else {
+            let input =
+                session.tensor_variable(batch.pixels, vec![BATCH_SIZE, 3, CARD_PIXELS], false)?;
+            let (set_logits, attribute_logits) = model.forward_with_attributes(session, input)?;
+            (
+                session.tensor_values(set_logits)?,
+                session.tensor_values(attribute_logits)?,
+            )
+        };
+        for (logit, target) in set_values.iter().zip(batch.set_targets) {
             triple_correct += usize::from((*logit >= 0.0) == (target >= 0.5));
         }
-        for (attribute_index, (logits, target)) in session
-            .tensor_values(attribute_logits)?
+        for (attribute_index, (logits, target)) in attribute_values
             .as_chunks::<3>()
             .0
             .iter()
@@ -256,11 +308,25 @@ fn evaluate(
             atlas_attribute_total[atlas_index] += 1;
         }
         session.truncate_autograd_graph(graph_boundary);
+        if let Some(ensemble) = ensemble.as_deref_mut() {
+            ensemble
+                .session
+                .truncate_autograd_graph(ensemble.graph_boundary);
+        }
     }
     let mut board_failures = 0_usize;
     for _ in 0..boards {
         let board = atlases.make_board(&mut board_rng, BOARD_CARDS);
-        let output = model.score_board(session, board.pixels, BOARD_CARDS)?;
+        let output = if let Some(ensemble) = ensemble.as_deref_mut() {
+            let primary = model.score_board(session, board.pixels.clone(), BOARD_CARDS)?;
+            let secondary =
+                ensemble
+                    .model
+                    .score_board(&mut ensemble.session, board.pixels, BOARD_CARDS)?;
+            average_board_scores(&primary, &secondary)?
+        } else {
+            model.score_board(session, board.pixels, BOARD_CARDS)?
+        };
         let decision = output
             .best_decision()
             .ok_or("policy produced no finite board decision")?;
@@ -322,8 +388,16 @@ fn evaluate(
         atlas_board_correct[board.atlas_index] += usize::from(correct);
         atlas_board_total[board.atlas_index] += 1;
         session.truncate_autograd_graph(graph_boundary);
+        if let Some(ensemble) = ensemble.as_deref_mut() {
+            ensemble
+                .session
+                .truncate_autograd_graph(ensemble.graph_boundary);
+        }
     }
     session.no_grad_exit();
+    if let Some(ensemble) = ensemble {
+        ensemble.session.no_grad_exit();
+    }
     let triple_total = batches * BATCH_SIZE;
     let attribute_total = triple_total * 3 * 4;
     Ok(Evaluation {
@@ -353,6 +427,54 @@ fn evaluate(
                 })
             })
             .collect::<Result<Vec<_>, std::num::TryFromIntError>>()?,
+    })
+}
+
+fn average_logits(first: &[f64], second: &[f64]) -> Result<Vec<f64>, std::io::Error> {
+    if first.len() != second.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "ensemble logit length mismatch: {} versus {}",
+                first.len(),
+                second.len()
+            ),
+        ));
+    }
+    let mut averaged = Vec::with_capacity(first.len());
+    for (&left, &right) in first.iter().zip(second) {
+        if !left.is_finite() || !right.is_finite() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "ensemble logits must be finite",
+            ));
+        }
+        let value = left.midpoint(right);
+        if !value.is_finite() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "ensemble logit average must be finite",
+            ));
+        }
+        averaged.push(value);
+    }
+    Ok(averaged)
+}
+
+fn average_board_scores(
+    first: &BoardScores,
+    second: &BoardScores,
+) -> Result<BoardScores, std::io::Error> {
+    if first.triples != second.triples {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "ensemble triple ordering mismatch",
+        ));
+    }
+    Ok(BoardScores {
+        triples: first.triples.clone(),
+        scores: average_logits(&first.scores, &second.scores)?,
+        attribute_logits: average_logits(&first.attribute_logits, &second.attribute_logits)?,
     })
 }
 
@@ -404,4 +526,75 @@ fn predicted_attributes(values: &[f64]) -> [usize; 4] {
             .max_by(|left, right| left.1.total_cmp(right.1))
             .map_or(usize::MAX, |(index, _)| index)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BoardScores, average_board_scores, average_logits};
+
+    #[test]
+    fn averages_logits_componentwise_without_rounding_shortcuts() {
+        let averaged = average_logits(&[1.0, 3.0, -5.0], &[5.0, 7.0, 9.0]).ok();
+        assert_eq!(averaged, Some(vec![3.0, 5.0, 2.0]));
+    }
+
+    #[test]
+    fn averages_board_scores_and_attribute_logits_componentwise() {
+        let first = BoardScores {
+            triples: vec![[0, 1, 2]],
+            scores: vec![1.0, 3.0],
+            attribute_logits: vec![1.0, 3.0, 5.0],
+        };
+        let second = BoardScores {
+            triples: first.triples.clone(),
+            scores: vec![5.0, 7.0],
+            attribute_logits: vec![5.0, 7.0, 9.0],
+        };
+        let averaged = average_board_scores(&first, &second).ok();
+        assert_eq!(
+            averaged.as_ref().map(|scores| scores.scores.clone()),
+            Some(vec![3.0, 5.0])
+        );
+        assert_eq!(
+            averaged.map(|scores| scores.attribute_logits),
+            Some(vec![3.0, 5.0, 7.0])
+        );
+    }
+
+    #[test]
+    fn board_average_requires_matching_triple_order_and_shapes() {
+        let first = BoardScores {
+            triples: vec![[0, 1, 2], [0, 1, 3]],
+            scores: vec![1.0, 2.0],
+            attribute_logits: vec![1.0, 2.0, 3.0],
+        };
+        let second = BoardScores {
+            triples: vec![[0, 1, 3], [0, 1, 2]],
+            scores: vec![3.0, 4.0],
+            attribute_logits: vec![4.0, 5.0, 6.0],
+        };
+        assert!(average_board_scores(&first, &second).is_err());
+
+        let second = BoardScores {
+            triples: first.triples.clone(),
+            scores: vec![3.0],
+            attribute_logits: first.attribute_logits.clone(),
+        };
+        assert!(average_board_scores(&first, &second).is_err());
+    }
+
+    #[test]
+    fn board_average_rejects_non_finite_logits() {
+        let first = BoardScores {
+            triples: vec![[0, 1, 2]],
+            scores: vec![f64::NAN],
+            attribute_logits: vec![1.0],
+        };
+        let second = BoardScores {
+            triples: first.triples.clone(),
+            scores: vec![1.0],
+            attribute_logits: first.attribute_logits.clone(),
+        };
+        assert!(average_board_scores(&first, &second).is_err());
+    }
 }
