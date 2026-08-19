@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# != 2 ]]; then
-  echo 'Usage: tools/evaluate-board-v7-research-shards.sh CHECKPOINT_DIR OUTPUT_ROOT' >&2
+if [[ $# != 2 && $# != 3 && $# != 4 && $# != 5 ]]; then
+  echo 'Usage: tools/evaluate-board-v7-research-shards.sh CHECKPOINT_DIR OUTPUT_ROOT [ENSEMBLE_CHECKPOINT_DIR [THIRD_CHECKPOINT_DIR [FOURTH_CHECKPOINT_DIR]]]' >&2
   exit 2
 fi
 
 checkpoint_dir=$1
 output_root=$2
+ensemble_checkpoint_dir=${3:-}
+third_checkpoint_dir=${4:-}
+fourth_checkpoint_dir=${5:-}
+ensemble_primary_weight=${ENSEMBLE_PRIMARY_WEIGHT:-0.5}
+read -r -a ensemble_weights <<< "${ENSEMBLE_WEIGHTS:-0.495 0.405 0.100}"
+read -r -a ensemble_four_weights <<< "${ENSEMBLE_FOUR_WEIGHTS:-0.4675 0.3825 0.075 0.075}"
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 project_root=$(cd -- "$script_dir/.." && pwd)
 research_dir="$project_root/vision-artifacts/board-v7-research-atlases"
@@ -15,6 +21,18 @@ checkpoint="$checkpoint_dir/set-vision.ftsv"
 digest_file="$project_root/vision/BOARD_V7_CORPORA.sha256"
 
 [[ -f "$checkpoint" ]] || { echo "missing checkpoint: $checkpoint" >&2; exit 1; }
+if [[ -n "$ensemble_checkpoint_dir" ]]; then
+  ensemble_checkpoint="$ensemble_checkpoint_dir/set-vision.ftsv"
+  [[ -f "$ensemble_checkpoint" ]] || { echo "missing ensemble checkpoint: $ensemble_checkpoint" >&2; exit 1; }
+fi
+if [[ -n "$third_checkpoint_dir" ]]; then
+  third_checkpoint="$third_checkpoint_dir/set-vision.ftsv"
+  [[ -f "$third_checkpoint" ]] || { echo "missing third checkpoint: $third_checkpoint" >&2; exit 1; }
+fi
+if [[ -n "$fourth_checkpoint_dir" ]]; then
+  fourth_checkpoint="$fourth_checkpoint_dir/set-vision.ftsv"
+  [[ -f "$fourth_checkpoint" ]] || { echo "missing fourth checkpoint: $fourth_checkpoint" >&2; exit 1; }
+fi
 [[ -d "$research_dir" ]] || { echo "missing research corpus: $research_dir" >&2; exit 1; }
 expected_digest=$(awk '$1 == "research" && $2 == 516 { print $3 }' "$digest_file")
 actual_digest=$("$project_root/tools/hash-vision-corpus.sh" "$research_dir")
@@ -59,6 +77,39 @@ for index in "${!shard_seeds[@]}"; do
   shard_count=$(find "$shard" -maxdepth 1 -type l | wc -l | tr -d ' ')
   [[ "$shard_count" == 172 ]] || { echo "seed $seed has $shard_count atlases, expected 172" >&2; exit 1; }
   cp "$checkpoint" "$shard_output/set-vision.ftsv"
+  ensemble_args=()
+  if [[ -n "$ensemble_checkpoint_dir" ]]; then
+    ensemble_output="$shard_output/ensemble"
+    mkdir -p "$ensemble_output"
+    cp "$ensemble_checkpoint" "$ensemble_output/set-vision.ftsv"
+    if [[ -n "$third_checkpoint_dir" ]]; then
+      third_output="$shard_output/third"
+      mkdir -p "$third_output"
+      cp "$third_checkpoint" "$third_output/set-vision.ftsv"
+      if [[ -n "$fourth_checkpoint_dir" ]]; then
+        fourth_output="$shard_output/fourth"
+        mkdir -p "$fourth_output"
+        cp "$fourth_checkpoint" "$fourth_output/set-vision.ftsv"
+        ensemble_args=(
+          --ensemble-output-dir "$ensemble_output"
+          --ensemble-third-output-dir "$third_output"
+          --ensemble-fourth-output-dir "$fourth_output"
+          --ensemble-four-weights "${ensemble_four_weights[@]}"
+        )
+      else
+        ensemble_args=(
+          --ensemble-output-dir "$ensemble_output"
+          --ensemble-third-output-dir "$third_output"
+          --ensemble-weights "${ensemble_weights[@]}"
+        )
+      fi
+    else
+      ensemble_args=(
+        --ensemble-output-dir "$ensemble_output"
+        --ensemble-primary-weight "$ensemble_primary_weight"
+      )
+    fi
+  fi
   log="$shard_output/eval.log"
   "$evaluator" \
     --eval-only \
@@ -66,6 +117,7 @@ for index in "${!shard_seeds[@]}"; do
     --eval-boards "${eval_boards[$index]}" \
     --triple-seed "${triple_seeds[$index]}" \
     --board-seed "${board_seeds[$index]}" \
+    "${ensemble_args[@]}" \
     --validation-atlas-dir "$shard" \
     --output-dir "$shard_output" > "$log"
   triple_correct=$(awk -F '[ :/]+' '/^triple_correct:/ { print $2; exit }' "$log")
