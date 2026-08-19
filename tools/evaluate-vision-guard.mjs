@@ -16,7 +16,7 @@ const overall = { boards: 0, errors: 0, accepted: 0, acceptedErrors: 0 }
 for (const row of rows) {
   const values = row.split('\t')
   const atlas = values[column.atlas]
-  const profile = atlas.match(/-p(blur|crop|shadow|lowcontrast|jpeg)/)?.[1] ?? 'clean'
+  const profile = atlas.match(/-p(blur|crop|shadow|lowcontrast|jpeg|defocus|tilt|occlusion|gamut|compound)/)?.[1] ?? 'clean'
   const correct = values[column.correct] === '1'
   const observation = {
     score: Number(values[column.score]),
