@@ -103,6 +103,7 @@ render_atlas() {
     --screenshot="$output_dir/$output_name.png" \
     "http://127.0.0.1:$preview_port/?vision-atlas=$theme&vision-seed=$seed&vision-card-width=$card_width&vision-capture=$capture_profile" \
     >/dev/null 2>/dev/null || status=$?
+  trash "$profile"
   if ((status != 0 && status != 124 && status != 137)); then
     return "$status"
   fi
