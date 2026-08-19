@@ -37,17 +37,20 @@ larger model won one run” must not be described as a scaling law.
 
 ## Shared implementation boundary
 
-The deployed policy is `../vision-policy/src/lib.rs`. Both the native reference evaluator and the
-WebAssembly runtime depend on it and load the same FrankenTorch `.ftsv` checkpoint. Never add a
-JavaScript inference copy or a second export format.
+`../vision-policy/src/lib.rs` owns two explicit policy families. The WebAssembly runtime constructs
+`DeployedVisualSetPolicy` and loads the shipped legacy single-convolution checkpoint; the native
+trainer and reference evaluator construct `ResearchVisualSetPolicy` and load current
+dilated-residual research checkpoints. Their state-dict key families are intentionally different,
+and all loads remain strict. Never add a JavaScript inference copy, a key adapter, or a second
+export format.
 
-Fast training currently has a second, training-only expression of that topology in
+Fast training currently has a second, training-only expression of the research topology in
 `../vision-mpsgraph/src/policy_graph.rs`. MPSGraph performs the tensor operations on Apple GPU
-hardware; its checkpoint is converted into the same FrankenTorch state dictionary used everywhere
-else. This duplication is a deliberate temporary cost, not a shared implementation. Every topology
-change must update both Rust modules and pass the fixed-batch forward/loss/gradient parity probe
-before its result is comparable. A future shared declarative topology description would remove this
-hazard without adding a second runtime.
+hardware; its checkpoint is converted into the research FrankenTorch state dictionary used by the
+native evaluator. This duplication is a deliberate temporary cost, not a shared implementation.
+Every research topology change must update both Rust modules and pass the fixed-batch
+forward/loss/gradient parity probe before its result is comparable. A future shared declarative
+topology description would remove this hazard without adding a second runtime.
 
 The trainer in `src/` owns data loading, balanced triple generation, losses, optimization, and
 evaluation. Training flags may change the optimizer recipe, but an accepted experiment must record
@@ -60,7 +63,8 @@ The current research evaluator uses `../vision-artifacts/validation-v2-atlases`,
 9001–9008 and widths 104, 120, 152, 192, 216, 272, 344, and 376 across all four themes. Its aggregate
 digest is `f883b4c2f509fd49c4d831bf44e3ad809c6ad1c50f031a58555a4c77d73c0d68`. It evaluates
 32,768 balanced triples and 4,096 12-card boards with fixed RNG seeds. The reported board metric
-scores the policy's highest-logit triple, which is the deployed action.
+scores the research policy's highest-logit triple; it is a research candidate action until a
+checkpoint passes promotion and is exported for the deployed topology.
 
 Board-v3 is historical. Its sealed holdout was exposed by the first candidate that cleared its
 research split, so neither that holdout nor its seven failures may guide board-v4 model selection.
@@ -334,5 +338,6 @@ by 30 failures while crop regressed by 15.
 
 Consequently the board-v6 sealed corpus was not passed to any evaluator, no abstention model was
 fitted, the browser checkpoint was not changed, and the shipped single-kernel topology remains the
-source default. Both experimental checkpoints and logs remain under
+browser deployment default. The native research default is the explicit dilated-residual topology.
+Both experimental checkpoints and logs remain under
 `../vision-artifacts/autoresearch-v6/`; the compact tracked result is `BOARD_V6_RESULTS.tsv`.

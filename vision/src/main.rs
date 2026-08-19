@@ -8,7 +8,7 @@ use ft_core::ExecutionMode;
 use ft_nn::{BCEWithLogitsLoss, CrossEntropyLoss, LossModule, Module};
 use ft_optim::{AdamW, Optimizer};
 use set_vision_data::{AtlasCollection, Rng, decode_card};
-use set_vision_policy::{BoardDecision, BoardScores, CARD_PIXELS, VisualSetPolicy};
+use set_vision_policy::{BoardDecision, BoardScores, CARD_PIXELS, ResearchVisualSetPolicy};
 use std::io::Write;
 
 #[allow(clippy::too_many_lines)]
@@ -29,7 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = Rng::new(config.seed);
 
     let mut session = FrankenTorchSession::new(ExecutionMode::Strict);
-    let model = VisualSetPolicy::new(&mut session)?;
+    let model = ResearchVisualSetPolicy::new(&mut session)?;
     if config.eval_only || config.probe_only {
         let checkpoint = config.output_dir.join("set-vision.ftsv");
         let state = ft_serialize::load_state_dict(&checkpoint)?;
@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let graph_boundary = session.autograd_graph_node_count();
     let mut ensemble = if let Some(output_dir) = config.ensemble_output_dir.as_ref() {
         let mut ensemble_session = FrankenTorchSession::new(ExecutionMode::Strict);
-        let ensemble_model = VisualSetPolicy::new(&mut ensemble_session)?;
+        let ensemble_model = ResearchVisualSetPolicy::new(&mut ensemble_session)?;
         let checkpoint = output_dir.join("set-vision.ftsv");
         let state = ft_serialize::load_state_dict(&checkpoint)?;
         ensemble_model.load_state_dict(&mut ensemble_session, &state, true)?;
@@ -48,7 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut third = None;
         if let Some(third_output_dir) = config.ensemble_third_output_dir.as_ref() {
             let mut third_session = FrankenTorchSession::new(ExecutionMode::Strict);
-            let third_model = VisualSetPolicy::new(&mut third_session)?;
+            let third_model = ResearchVisualSetPolicy::new(&mut third_session)?;
             let third_checkpoint = third_output_dir.join("set-vision.ftsv");
             let third_state = ft_serialize::load_state_dict(&third_checkpoint)?;
             third_model.load_state_dict(&mut third_session, &third_state, true)?;
@@ -63,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut fourth = None;
         if let Some(fourth_output_dir) = config.ensemble_fourth_output_dir.as_ref() {
             let mut fourth_session = FrankenTorchSession::new(ExecutionMode::Strict);
-            let fourth_model = VisualSetPolicy::new(&mut fourth_session)?;
+            let fourth_model = ResearchVisualSetPolicy::new(&mut fourth_session)?;
             let fourth_checkpoint = fourth_output_dir.join("set-vision.ftsv");
             let fourth_state = ft_serialize::load_state_dict(&fourth_checkpoint)?;
             fourth_model.load_state_dict(&mut fourth_session, &fourth_state, true)?;
@@ -250,13 +250,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 struct EnsembleMember {
     session: FrankenTorchSession,
-    model: VisualSetPolicy,
+    model: ResearchVisualSetPolicy,
     graph_boundary: usize,
 }
 
 struct EnsemblePolicy {
     session: FrankenTorchSession,
-    model: VisualSetPolicy,
+    model: ResearchVisualSetPolicy,
     graph_boundary: usize,
     third: Option<EnsembleMember>,
     fourth: Option<EnsembleMember>,
@@ -297,7 +297,7 @@ struct AtlasEvaluation {
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn evaluate(
     session: &mut FrankenTorchSession,
-    model: &VisualSetPolicy,
+    model: &ResearchVisualSetPolicy,
     mut ensemble: Option<&mut EnsemblePolicy>,
     atlases: &AtlasCollection,
     graph_boundary: usize,

@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use ft_api::FrankenTorchSession;
 use ft_core::ExecutionMode;
 use ft_nn::Module;
-use set_vision_policy::{CARD_HEIGHT, CARD_PIXELS, CARD_WIDTH, CHANNELS, VisualSetPolicy};
+use set_vision_policy::{CARD_HEIGHT, CARD_PIXELS, CARD_WIDTH, CHANNELS, DeployedVisualSetPolicy};
 
 const MIN_CARDS: usize = 3;
 const MAX_CARDS: usize = 32;
@@ -17,7 +17,7 @@ const EMBEDDED_CHECKPOINT: &[u8] = include_bytes!("../../vision-artifacts/model/
 
 struct Runtime {
     session: FrankenTorchSession,
-    policy: VisualSetPolicy,
+    policy: DeployedVisualSetPolicy,
     graph_boundary: usize,
     cards: Vec<f64>,
     card_count: usize,
@@ -30,7 +30,8 @@ struct Runtime {
 impl Runtime {
     fn new() -> Result<Self, String> {
         let mut session = FrankenTorchSession::new(ExecutionMode::Strict);
-        let policy = VisualSetPolicy::new(&mut session).map_err(|error| error.to_string())?;
+        let policy =
+            DeployedVisualSetPolicy::new(&mut session).map_err(|error| error.to_string())?;
         let state = ft_serialize::load_state_dict_from_bytes(EMBEDDED_CHECKPOINT)
             .map_err(|error| error.to_string())?;
         policy

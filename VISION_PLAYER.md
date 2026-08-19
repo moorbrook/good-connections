@@ -13,17 +13,20 @@ does not read card labels, React state, solutions, or network payloads.
 
 ## Honest model description
 
-`VisualSetPolicy` is a compact learned convolutional policy, not a transformer. It has no attention,
-language model, token sequence, or recursive-language-model loop. It is therefore neither a VLM nor
-a general VLA. In the narrow control sense it is a vision-to-action policy: its action is the three
-card indices to select.
+The project has two explicit compact learned convolutional policies, not a transformer:
+`DeployedVisualSetPolicy` is the shipped browser model, while `ResearchVisualSetPolicy` is the
+current native model-search topology. Neither has attention, a language model, a token sequence, or
+a recursive-language-model loop. They are therefore neither VLMs nor general VLAs. In the narrow
+control sense each is a vision-to-action policy: its action is the three card indices to select.
 
-The 41,918-parameter topology is:
+The shipped 41,918-parameter `DeployedVisualSetPolicy` topology is:
 
 1. Area-resample each card screenshot to 30×21 RGB.
 2. Apply a 5×5 stride-2 convolution from 3 to 12 channels and GELU.
 3. Fork into four attribute-specialist branches. Each applies its own 3×3 stride-2 convolution from
-   12 to 8 channels and GELU.
+   12 to 8 channels and GELU. `ResearchVisualSetPolicy` preserves this local path and adds a
+   rate-two dilated residual convolution in every branch; its checkpoint has a different state-dict
+   key family and is not a browser drop-in.
 4. In each branch, flatten the 8×6×8 feature map, project it to 24 features with GELU, and predict
    one group of three attribute logits.
 5. Softmax each attribute, sum the three cards' distributions, and score each attribute with a
@@ -45,16 +48,18 @@ failures, triple accuracy, measured latency, WASM size, and simplicity.
 | Concern | Owner | Consumers |
 | --- | --- | --- |
 | Topology, dimensions, relation scoring, board action enumeration | `vision-policy/` | trainer and WASM runtime |
-| Parameters | one FrankenTorch `.ftsv` checkpoint | native evaluation and embedded browser runtime |
+| Parameters | topology-specific FrankenTorch `.ftsv` checkpoints | research evaluator or embedded browser runtime |
 | Training and offline evaluation | `vision/` | autoresearch loop |
 | MPS training graph | `vision-mpsgraph/` | accelerated training only |
 | Browser ABI only | `vision-wasm/` | extension |
 | DOM capture, card rectangles, clicks | `extension/` | live browser |
 
-There is no handwritten browser copy of convolution, GELU, softmax, or relation scoring. Both native
-evaluation and WebAssembly call `VisualSetPolicy::score_board` through FrankenTorch. The MPSGraph
-trainer temporarily duplicates the topology in a training-only graph and exports the same `.ftsv`
-format; fixed-batch forward/loss/gradient parity checks guard that duplication.
+There is no handwritten browser copy of convolution, GELU, softmax, or relation scoring. WebAssembly
+constructs `DeployedVisualSetPolicy` and loads the shipped legacy single-convolution checkpoint;
+native training and evaluation construct `ResearchVisualSetPolicy` and load research checkpoints.
+The MPSGraph trainer temporarily duplicates the research topology in a training-only graph and
+exports the same `.ftsv` format; fixed-batch forward/loss/gradient parity checks guard that
+duplication. Strict loading keeps the two key families separate.
 
 Two boundaries intentionally have separate adapters:
 
@@ -108,8 +113,10 @@ to commit `dd6daf414e84462d2e0f35d8c103e1321e758b44`. Architecture-search traini
 direct MPSGraph Rust crate in `vision-mpsgraph/`. MPSGraph is a training accelerator only; it is not
 a second browser inference runtime. The accelerated trainer exports through FrankenTorch's native
 state-dict serializer, and the native evaluator must accept and verify every exported checkpoint.
-`ft-serialize` remains the only checkpoint format, and the WASM crate loads that same state into the
-shared policy. `wasm-bindgen` supplies JavaScript glue; it does not reimplement model operators.
+`ft-serialize` remains the only checkpoint format. The native trainer and evaluator use
+`ResearchVisualSetPolicy`; the WASM crate loads only the separately shipped deployed state into
+`DeployedVisualSetPolicy`. `wasm-bindgen` supplies JavaScript glue; it does not reimplement model
+operators.
 
 The controlled specialist recipe runs with:
 
@@ -134,7 +141,9 @@ evidence timestamp is the deterministic value zero instead of calling `SystemTim
 traps on `wasm32-unknown-unknown`. Native clock behavior is unchanged. Remove the patch when upstream
 provides a WASM-safe clock.
 
-Promote a validated checkpoint to `vision-artifacts/model/set-vision.ftsv`, then build and benchmark:
+Promote a validated deployed-topology checkpoint to `vision-artifacts/model/set-vision.ftsv`, then
+build and benchmark. Research checkpoints use the dilated-residual topology and cannot be copied
+into the browser artifact without retraining/exporting the deployed topology:
 
 ```sh
 tools/build-vision-extension.sh

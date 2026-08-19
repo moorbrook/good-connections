@@ -144,14 +144,71 @@ impl From<AutogradError> for PolicyError {
     }
 }
 
-struct AttributeHead {
+struct DeployedAttributeHead {
+    convolution: Conv2d,
+    projection: Linear,
+    classifier: Linear,
+}
+
+impl DeployedAttributeHead {
+    fn new(session: &mut FrankenTorchSession) -> Result<Self, AutogradError> {
+        Ok(Self {
+            convolution: Conv2d::new(
+                session,
+                CONV_CHANNELS,
+                SPECIALIST_CHANNELS,
+                (3, 3),
+                (2, 2),
+                (1, 1),
+                true,
+            )?,
+            projection: Linear::new(session, SPECIALIST_FEATURES, SPECIALIST_EMBED_DIM, true)?,
+            classifier: Linear::new(session, SPECIALIST_EMBED_DIM, ATTRIBUTE_VALUE_COUNT, true)?,
+        })
+    }
+}
+
+impl Module for DeployedAttributeHead {
+    fn forward(
+        &self,
+        session: &mut FrankenTorchSession,
+        input: TensorNodeId,
+    ) -> Result<TensorNodeId, AutogradError> {
+        let card_count = session.tensor_shape(input)?[0];
+        let encoded = self.convolution.forward(session, input)?;
+        finish_attribute_head(
+            session,
+            encoded,
+            card_count,
+            &self.projection,
+            &self.classifier,
+        )
+    }
+
+    fn parameters(&self) -> Vec<TensorNodeId> {
+        self.named_children()
+            .into_iter()
+            .flat_map(|(_, module)| module.parameters())
+            .collect()
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module)> {
+        vec![
+            ("convolution".to_string(), &self.convolution),
+            ("projection".to_string(), &self.projection),
+            ("classifier".to_string(), &self.classifier),
+        ]
+    }
+}
+
+struct ResearchAttributeHead {
     local_convolution: Conv2d,
     dilated_residual_convolution: Conv2d,
     projection: Linear,
     classifier: Linear,
 }
 
-impl AttributeHead {
+impl ResearchAttributeHead {
     fn new(session: &mut FrankenTorchSession) -> Result<Self, AutogradError> {
         Ok(Self {
             local_convolution: Conv2d::new(
@@ -179,7 +236,21 @@ impl AttributeHead {
     }
 }
 
-impl Module for AttributeHead {
+fn finish_attribute_head(
+    session: &mut FrankenTorchSession,
+    encoded: TensorNodeId,
+    card_count: usize,
+    projection: &Linear,
+    classifier: &Linear,
+) -> Result<TensorNodeId, AutogradError> {
+    let encoded = session.tensor_gelu(encoded)?;
+    let encoded = session.tensor_reshape(encoded, vec![card_count, SPECIALIST_FEATURES])?;
+    let encoded = projection.forward(session, encoded)?;
+    let encoded = session.tensor_gelu(encoded)?;
+    classifier.forward(session, encoded)
+}
+
+impl Module for ResearchAttributeHead {
     fn forward(
         &self,
         session: &mut FrankenTorchSession,
@@ -189,11 +260,13 @@ impl Module for AttributeHead {
         let local = self.local_convolution.forward(session, input)?;
         let residual = self.dilated_residual_convolution.forward(session, local)?;
         let encoded = session.tensor_add(local, residual)?;
-        let encoded = session.tensor_gelu(encoded)?;
-        let encoded = session.tensor_reshape(encoded, vec![card_count, SPECIALIST_FEATURES])?;
-        let encoded = self.projection.forward(session, encoded)?;
-        let encoded = session.tensor_gelu(encoded)?;
-        self.classifier.forward(session, encoded)
+        finish_attribute_head(
+            session,
+            encoded,
+            card_count,
+            &self.projection,
+            &self.classifier,
+        )
     }
 
     fn parameters(&self) -> Vec<TensorNodeId> {
@@ -216,35 +289,23 @@ impl Module for AttributeHead {
     }
 }
 
-/// The one learned policy definition shared by training and browser inference.
-///
-/// It has a shared low-level convolution, four attribute-specialist branches,
-/// and a learned permutation-invariant relation scorer. Each specialist keeps
-/// its local stride-two features while adding a rate-two dilated residual path.
-/// It is not a transformer, VLM, or VLA.
-pub struct VisualSetPolicy {
+/// Shared topology-independent implementation for the deployed and research
+/// policy wrappers. The wrapper's attribute-head type determines the exported
+/// state-dict key family, so strict loading cannot silently mix topologies.
+struct PolicyCore<H> {
     shared_convolution: Conv2d,
-    attribute_heads: [AttributeHead; ATTRIBUTE_COUNT],
+    attribute_heads: [H; ATTRIBUTE_COUNT],
     attribute_relation_in: Linear,
     attribute_relation_out: Linear,
     set_relation_in: Linear,
     set_relation_out: Linear,
 }
 
-impl fmt::Debug for VisualSetPolicy {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("VisualSetPolicy")
-            .field("input", &(CARD_HEIGHT, CARD_WIDTH, CHANNELS))
-            .field("shared_channels", &CONV_CHANNELS)
-            .field("specialist_channels", &SPECIALIST_CHANNELS)
-            .field("specialist_embedding_width", &SPECIALIST_EMBED_DIM)
-            .finish_non_exhaustive()
-    }
-}
-
-impl VisualSetPolicy {
-    pub fn new(session: &mut FrankenTorchSession) -> Result<Self, AutogradError> {
+impl<H: Module> PolicyCore<H> {
+    fn new<F>(session: &mut FrankenTorchSession, mut head_new: F) -> Result<Self, AutogradError>
+    where
+        F: FnMut(&mut FrankenTorchSession) -> Result<H, AutogradError>,
+    {
         Ok(Self {
             shared_convolution: Conv2d::new(
                 session,
@@ -256,10 +317,10 @@ impl VisualSetPolicy {
                 true,
             )?,
             attribute_heads: [
-                AttributeHead::new(session)?,
-                AttributeHead::new(session)?,
-                AttributeHead::new(session)?,
-                AttributeHead::new(session)?,
+                head_new(session)?,
+                head_new(session)?,
+                head_new(session)?,
+                head_new(session)?,
             ],
             attribute_relation_in: Linear::new(
                 session,
@@ -273,7 +334,7 @@ impl VisualSetPolicy {
         })
     }
 
-    pub fn forward_with_attributes(
+    fn forward_with_attributes(
         &self,
         session: &mut FrankenTorchSession,
         input: TensorNodeId,
@@ -341,7 +402,7 @@ impl VisualSetPolicy {
 
     /// Scores every three-card action after encoding each board card exactly once.
     /// Training evaluation and browser inference both call this method.
-    pub fn score_board(
+    fn score_board(
         &self,
         session: &mut FrankenTorchSession,
         pixels: Vec<f64>,
@@ -400,7 +461,7 @@ impl VisualSetPolicy {
     }
 }
 
-impl Module for VisualSetPolicy {
+impl<H: Module> Module for PolicyCore<H> {
     fn forward(
         &self,
         session: &mut FrankenTorchSession,
@@ -441,12 +502,140 @@ impl Module for VisualSetPolicy {
     }
 }
 
+/// The shipped browser policy. Its state dict uses the legacy
+/// `attribute_head_N.convolution.*` keys and the original single-convolution
+/// specialist topology.
+pub struct DeployedVisualSetPolicy {
+    core: PolicyCore<DeployedAttributeHead>,
+}
+
+impl fmt::Debug for DeployedVisualSetPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeployedVisualSetPolicy")
+            .field("input", &(CARD_HEIGHT, CARD_WIDTH, CHANNELS))
+            .field("shared_channels", &CONV_CHANNELS)
+            .field("specialist_channels", &SPECIALIST_CHANNELS)
+            .field("specialist_embedding_width", &SPECIALIST_EMBED_DIM)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DeployedVisualSetPolicy {
+    pub fn new(session: &mut FrankenTorchSession) -> Result<Self, AutogradError> {
+        Ok(Self {
+            core: PolicyCore::new(session, DeployedAttributeHead::new)?,
+        })
+    }
+
+    pub fn forward_with_attributes(
+        &self,
+        session: &mut FrankenTorchSession,
+        input: TensorNodeId,
+    ) -> Result<(TensorNodeId, TensorNodeId), AutogradError> {
+        self.core.forward_with_attributes(session, input)
+    }
+
+    pub fn score_board(
+        &self,
+        session: &mut FrankenTorchSession,
+        pixels: Vec<f64>,
+        card_count: usize,
+    ) -> Result<BoardScores, PolicyError> {
+        self.core.score_board(session, pixels, card_count)
+    }
+}
+
+impl Module for DeployedVisualSetPolicy {
+    fn forward(
+        &self,
+        session: &mut FrankenTorchSession,
+        input: TensorNodeId,
+    ) -> Result<TensorNodeId, AutogradError> {
+        self.core.forward(session, input)
+    }
+
+    fn parameters(&self) -> Vec<TensorNodeId> {
+        self.core.parameters()
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module)> {
+        self.core.named_children()
+    }
+}
+
+/// The native model-search policy. Its state dict uses the current
+/// `attribute_head_N.local_convolution.*` and
+/// `attribute_head_N.dilated_residual_convolution.*` keys.
+pub struct ResearchVisualSetPolicy {
+    core: PolicyCore<ResearchAttributeHead>,
+}
+
+impl fmt::Debug for ResearchVisualSetPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResearchVisualSetPolicy")
+            .field("input", &(CARD_HEIGHT, CARD_WIDTH, CHANNELS))
+            .field("shared_channels", &CONV_CHANNELS)
+            .field("specialist_channels", &SPECIALIST_CHANNELS)
+            .field("specialist_embedding_width", &SPECIALIST_EMBED_DIM)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ResearchVisualSetPolicy {
+    pub fn new(session: &mut FrankenTorchSession) -> Result<Self, AutogradError> {
+        Ok(Self {
+            core: PolicyCore::new(session, ResearchAttributeHead::new)?,
+        })
+    }
+
+    pub fn forward_with_attributes(
+        &self,
+        session: &mut FrankenTorchSession,
+        input: TensorNodeId,
+    ) -> Result<(TensorNodeId, TensorNodeId), AutogradError> {
+        self.core.forward_with_attributes(session, input)
+    }
+
+    pub fn score_board(
+        &self,
+        session: &mut FrankenTorchSession,
+        pixels: Vec<f64>,
+        card_count: usize,
+    ) -> Result<BoardScores, PolicyError> {
+        self.core.score_board(session, pixels, card_count)
+    }
+}
+
+impl Module for ResearchVisualSetPolicy {
+    fn forward(
+        &self,
+        session: &mut FrankenTorchSession,
+        input: TensorNodeId,
+    ) -> Result<TensorNodeId, AutogradError> {
+        self.core.forward(session, input)
+    }
+
+    fn parameters(&self) -> Vec<TensorNodeId> {
+        self.core.parameters()
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module)> {
+        self.core.named_children()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ft_api::FrankenTorchSession;
     use ft_core::ExecutionMode;
+    use ft_nn::Module;
 
-    use super::{BoardScores, CARD_PIXELS, PolicyError, VisualSetPolicy};
+    use super::{
+        ATTRIBUTE_COUNT, BoardScores, CARD_PIXELS, DeployedVisualSetPolicy, PolicyError,
+        ResearchVisualSetPolicy,
+    };
 
     #[test]
     fn decision_diagnostics_rank_scores_and_measure_attribute_certainty() {
@@ -466,7 +655,7 @@ mod tests {
     fn board_scoring_rejects_invalid_input_at_its_boundary()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut session = FrankenTorchSession::new(ExecutionMode::Strict);
-        let policy = VisualSetPolicy::new(&mut session)?;
+        let policy = DeployedVisualSetPolicy::new(&mut session)?;
         assert!(matches!(
             policy.score_board(&mut session, Vec::new(), 2),
             Err(PolicyError::InvalidCardCount(2))
@@ -483,7 +672,7 @@ mod tests {
     fn board_path_matches_direct_triple_scoring() -> Result<(), Box<dyn std::error::Error>> {
         const CARD_COUNT: usize = 5;
         let mut session = FrankenTorchSession::new(ExecutionMode::Strict);
-        let policy = VisualSetPolicy::new(&mut session)?;
+        let policy = ResearchVisualSetPolicy::new(&mut session)?;
         session.no_grad_enter();
         let pixels = (0..CARD_COUNT * CARD_PIXELS)
             .map(|index| u32::try_from(index % 251).map(|value| f64::from(value) / 250.0))
@@ -510,6 +699,58 @@ mod tests {
         for (cached, repeated) in board.scores.iter().zip(direct) {
             assert!((cached - repeated).abs() < 1.0e-10);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn policy_state_dict_key_families_are_topology_specific_and_strict()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut deployed_session = FrankenTorchSession::new(ExecutionMode::Strict);
+        let deployed = DeployedVisualSetPolicy::new(&mut deployed_session)?;
+        let deployed_state = deployed.state_dict(&deployed_session)?;
+        for index in 0..ATTRIBUTE_COUNT {
+            let legacy_weight = format!("attribute_head_{index}.convolution.weight");
+            let legacy_bias = format!("attribute_head_{index}.convolution.bias");
+            let research_weight = format!("attribute_head_{index}.local_convolution.weight");
+            assert!(deployed_state.contains_key(&legacy_weight));
+            assert!(deployed_state.contains_key(&legacy_bias));
+            assert!(!deployed_state.contains_key(&research_weight));
+        }
+
+        let mut deployed_reload_session = FrankenTorchSession::new(ExecutionMode::Strict);
+        let deployed_reload = DeployedVisualSetPolicy::new(&mut deployed_reload_session)?;
+        let deployed_report =
+            deployed_reload.load_state_dict(&mut deployed_reload_session, &deployed_state, true)?;
+        assert_eq!(deployed_report.missing_keys, Vec::<String>::new());
+        assert_eq!(deployed_report.unexpected_keys, Vec::<String>::new());
+
+        let mut research_session = FrankenTorchSession::new(ExecutionMode::Strict);
+        let research = ResearchVisualSetPolicy::new(&mut research_session)?;
+        let research_state = research.state_dict(&research_session)?;
+        for index in 0..ATTRIBUTE_COUNT {
+            let legacy_weight = format!("attribute_head_{index}.convolution.weight");
+            let local_weight = format!("attribute_head_{index}.local_convolution.weight");
+            let residual_weight =
+                format!("attribute_head_{index}.dilated_residual_convolution.weight");
+            assert!(!research_state.contains_key(&legacy_weight));
+            assert!(research_state.contains_key(&local_weight));
+            assert!(research_state.contains_key(&residual_weight));
+        }
+
+        let mut research_reload_session = FrankenTorchSession::new(ExecutionMode::Strict);
+        let research_reload = ResearchVisualSetPolicy::new(&mut research_reload_session)?;
+        let research_report =
+            research_reload.load_state_dict(&mut research_reload_session, &research_state, true)?;
+        assert_eq!(research_report.missing_keys, Vec::<String>::new());
+        assert_eq!(research_report.unexpected_keys, Vec::<String>::new());
+
+        let mut mismatch_session = FrankenTorchSession::new(ExecutionMode::Strict);
+        let mismatch = DeployedVisualSetPolicy::new(&mut mismatch_session)?;
+        assert!(
+            mismatch
+                .load_state_dict(&mut mismatch_session, &research_state, true)
+                .is_err()
+        );
         Ok(())
     }
 }
