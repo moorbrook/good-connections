@@ -521,3 +521,13 @@ abstention guard is permitted. Only an aggregate with at most 81 raw failures
 may receive the one-time sealed 10,000-board assessment, allocated
 3,334/3,333/3,333 across sealed seeds with board RNG seeds
 `304222009835245–247`. Full details are in `BOARD_V8_PROTOCOL.md`.
+
+**Training corpus lock.** Before v8 training, a separate 688-atlas procedural
+corpus was rendered with seeds `20001–20004`. DPR-1 uses widths `89/193/347`
+and all eleven profiles; DPR-2 uses widths `127/263` and the five-profile
+subset `clean/crop/shadow/tilt/occlusion`. Its seeds and widths do not overlap
+the locked v8 research or sealed corpora. The corpus verifier passed its
+counts, filename contract, themes, profiles, DPRs, widths, and seeds. Native
+inspection of harsh occlusion and compound atlases confirmed intact grids and
+human-readable evidence. The pre-training digest is
+`a8b5c19760547bc262a0946b2f15b31c15c39a5dc5feeb42124d69d61e5437e4`.

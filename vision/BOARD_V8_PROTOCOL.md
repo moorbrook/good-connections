@@ -87,6 +87,26 @@ For a CSS width `w`, expected PNG dimensions are
 dimensions; the loader area-resamples each card to the fixed 30x21 RGB model
 input. The filename's `-dpr2` token is part of the data contract.
 
+## Locked training corpus
+
+Directory: `vision-artifacts/board-v8-training-atlases`
+
+- Procedural seeds: `20001`, `20002`, `20003`, `20004`.
+- Themes: `classic`, `nocturne`, `atelier`, `signal`.
+- DPR 1, CSS widths `89`, `193`, `347`, with all eleven profiles.
+- DPR 2, CSS widths `127`, `263`, with `clean`, `crop`, `shadow`, `tilt`,
+  and `occlusion`.
+- 528 DPR-1 atlases plus 160 DPR-2 atlases = **688 PNG atlases**.
+- Each seed and theme contributes 172 atlases.
+- Sorted per-file aggregate SHA-256:
+  `a8b5c19760547bc262a0946b2f15b31c15c39a5dc5feeb42124d69d61e5437e4`.
+
+The seeds and widths are disjoint from the v8 research and sealed corpora and
+from the inspected v7 training, research, and sealed matrices. Native QA of
+the `nocturne` DPR-2 occlusion and `signal` compound samples confirmed intact
+9x9 grids and readable attribute evidence. This digest was locked before v8
+training began and is also recorded in `BOARD_V8_TRAINING.sha256`.
+
 ## Rendering and integrity
 
 From the repository root, render the portions separately. The renderer uses
