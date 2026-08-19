@@ -10,22 +10,46 @@ use ft_optim::{AdamW, Optimizer};
 use set_vision_data::{AtlasCollection, BoardKind, Rng, decode_card};
 use set_vision_policy::{
     BoardDecision, BoardScores, CARD_PIXELS, RawBoardAction, ResearchVisualSetPolicy,
-    TypedRelationResearchPolicy,
+    TypedRelationResearchPolicy, WideTypedRelationResearchPolicy,
 };
 use std::io::Write;
+
+fn add_negative_logsumexp_loss(
+    session: &mut FrankenTorchSession,
+    loss: ft_autograd::TensorNodeId,
+    set_logits: ft_autograd::TensorNodeId,
+    batch_size: usize,
+    weight: f64,
+) -> Result<ft_autograd::TensorNodeId, ft_autograd::AutogradError> {
+    if weight == 0.0 {
+        return Ok(loss);
+    }
+    let negative_start = batch_size / 2;
+    let negative_logits =
+        session.tensor_narrow(set_logits, 0, negative_start, batch_size - negative_start)?;
+    let negative_logsumexp = session.tensor_logsumexp(negative_logits, 0)?;
+    let negative_target = session.tensor_variable(vec![0.0], vec![1], false)?;
+    let aggregate_loss = BCEWithLogitsLoss.forward(session, negative_logsumexp, negative_target)?;
+    let weighted_aggregate = session.tensor_mul_scalar(aggregate_loss, weight)?;
+    session.tensor_add(loss, weighted_aggregate)
+}
 
 #[derive(Debug)]
 enum ResearchPolicyVariant {
     Legacy(ResearchVisualSetPolicy),
     Typed(TypedRelationResearchPolicy),
+    WideTyped(WideTypedRelationResearchPolicy),
 }
 
 impl ResearchPolicyVariant {
     fn new(
         session: &mut FrankenTorchSession,
         typed_relations: bool,
+        wide_vision: bool,
     ) -> Result<Self, ft_autograd::AutogradError> {
-        if typed_relations {
+        if wide_vision {
+            WideTypedRelationResearchPolicy::new(session).map(Self::WideTyped)
+        } else if typed_relations {
             TypedRelationResearchPolicy::new(session).map(Self::Typed)
         } else {
             ResearchVisualSetPolicy::new(session).map(Self::Legacy)
@@ -56,6 +80,15 @@ impl ResearchPolicyVariant {
                     relations: Some(relation_logits),
                 })
             }
+            Self::WideTyped(policy) => {
+                let (set_logits, attribute_logits, relation_logits) =
+                    policy.forward_with_relations(session, input)?;
+                Ok(PolicyOutputs {
+                    set: set_logits,
+                    attributes: attribute_logits,
+                    relations: Some(relation_logits),
+                })
+            }
         }
     }
 
@@ -68,6 +101,7 @@ impl ResearchPolicyVariant {
         match self {
             Self::Legacy(policy) => policy.score_board(session, pixels, card_count),
             Self::Typed(policy) => policy.score_board(session, pixels, card_count),
+            Self::WideTyped(policy) => policy.score_board(session, pixels, card_count),
         }
     }
 }
@@ -81,6 +115,7 @@ impl Module for ResearchPolicyVariant {
         match self {
             Self::Legacy(policy) => policy.forward(session, input),
             Self::Typed(policy) => policy.forward(session, input),
+            Self::WideTyped(policy) => policy.forward(session, input),
         }
     }
 
@@ -88,6 +123,7 @@ impl Module for ResearchPolicyVariant {
         match self {
             Self::Legacy(policy) => policy.parameters(),
             Self::Typed(policy) => policy.parameters(),
+            Self::WideTyped(policy) => policy.parameters(),
         }
     }
 
@@ -95,6 +131,7 @@ impl Module for ResearchPolicyVariant {
         match self {
             Self::Legacy(policy) => policy.named_children(),
             Self::Typed(policy) => policy.named_children(),
+            Self::WideTyped(policy) => policy.named_children(),
         }
     }
 }
@@ -129,7 +166,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = Rng::new(config.seed);
 
     let mut session = FrankenTorchSession::new(ExecutionMode::Strict);
-    let model = ResearchPolicyVariant::new(&mut session, config.typed_relations)?;
+    let model =
+        ResearchPolicyVariant::new(&mut session, config.typed_relations, config.wide_vision)?;
     if config.eval_only || config.probe_only {
         let checkpoint = config.output_dir.join("set-vision.ftsv");
         let state = ft_serialize::load_state_dict(&checkpoint)?;
@@ -139,8 +177,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let graph_boundary = session.autograd_graph_node_count();
     let mut ensemble = if let Some(output_dir) = config.ensemble_output_dir.as_ref() {
         let mut ensemble_session = FrankenTorchSession::new(ExecutionMode::Strict);
-        let ensemble_model =
-            ResearchPolicyVariant::new(&mut ensemble_session, config.typed_relations)?;
+        let ensemble_model = ResearchPolicyVariant::new(
+            &mut ensemble_session,
+            config.typed_relations,
+            config.wide_vision,
+        )?;
         let checkpoint = output_dir.join("set-vision.ftsv");
         let state = ft_serialize::load_state_dict(&checkpoint)?;
         ensemble_model.load_state_dict(&mut ensemble_session, &state, true)?;
@@ -149,8 +190,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut third = None;
         if let Some(third_output_dir) = config.ensemble_third_output_dir.as_ref() {
             let mut third_session = FrankenTorchSession::new(ExecutionMode::Strict);
-            let third_model =
-                ResearchPolicyVariant::new(&mut third_session, config.typed_relations)?;
+            let third_model = ResearchPolicyVariant::new(
+                &mut third_session,
+                config.typed_relations,
+                config.wide_vision,
+            )?;
             let third_checkpoint = third_output_dir.join("set-vision.ftsv");
             let third_state = ft_serialize::load_state_dict(&third_checkpoint)?;
             third_model.load_state_dict(&mut third_session, &third_state, true)?;
@@ -165,8 +209,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut fourth = None;
         if let Some(fourth_output_dir) = config.ensemble_fourth_output_dir.as_ref() {
             let mut fourth_session = FrankenTorchSession::new(ExecutionMode::Strict);
-            let fourth_model =
-                ResearchPolicyVariant::new(&mut fourth_session, config.typed_relations)?;
+            let fourth_model = ResearchPolicyVariant::new(
+                &mut fourth_session,
+                config.typed_relations,
+                config.wide_vision,
+            )?;
             let fourth_checkpoint = fourth_output_dir.join("set-vision.ftsv");
             let fourth_state = ft_serialize::load_state_dict(&fourth_checkpoint)?;
             fourth_model.load_state_dict(&mut fourth_session, &fourth_state, true)?;
@@ -224,7 +271,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if config.probe_only {
         let atlases = atlases.as_ref().ok_or("probe requires an atlas corpus")?;
         let mut probe_rng = Rng::new(99005);
-        let batch = atlases.make_batch(&mut probe_rng, 64, false);
+        let batch = if config.board_correlated_negatives {
+            atlases.make_board_correlated_training_batch(&mut probe_rng, 64, false)
+        } else if config.negative_logsumexp_loss_weight > 0.0 {
+            atlases.make_grouped_training_batch(&mut probe_rng, 64, false)
+        } else {
+            atlases.make_batch(&mut probe_rng, 64, false)
+        };
         let input = session.tensor_variable(batch.pixels, vec![64, 3, CARD_PIXELS], false)?;
         let set_targets = session.tensor_variable(batch.set_targets, vec![64, 1], false)?;
         let attribute_targets =
@@ -247,6 +300,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 session.tensor_mul_scalar(relation_loss, config.relation_loss_weight)?;
             loss = session.tensor_add(loss, relation_loss)?;
         }
+        loss = add_negative_logsumexp_loss(
+            &mut session,
+            loss,
+            outputs.set,
+            64,
+            config.negative_logsumexp_loss_weight,
+        )?;
         println!("probe_loss: {:.9}", session.tensor_values(loss)?[0]);
         let _report = session.tensor_backward(loss)?;
         let first_parameter = model.parameters()[0];
@@ -274,7 +334,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 f64::from(u32::try_from(step - 1)?) / f64::from(u32::try_from(config.steps)?);
             let cosine = 1.0_f64.midpoint((std::f64::consts::PI * progress).cos());
             optimizer.set_lr(config.learning_rate * (0.05 + 0.95 * cosine));
-            let batch = atlases.make_training_batch(&mut rng, config.batch_size, config.augment);
+            let batch = if config.board_correlated_negatives {
+                atlases.make_board_correlated_training_batch(
+                    &mut rng,
+                    config.batch_size,
+                    config.augment,
+                )
+            } else if config.negative_logsumexp_loss_weight > 0.0 {
+                atlases.make_grouped_training_batch(&mut rng, config.batch_size, config.augment)
+            } else {
+                atlases.make_training_batch(&mut rng, config.batch_size, config.augment)
+            };
             let input = session.tensor_variable(
                 batch.pixels,
                 vec![config.batch_size, 3, CARD_PIXELS],
@@ -310,6 +380,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     session.tensor_mul_scalar(relation_loss, config.relation_loss_weight)?;
                 loss = session.tensor_add(loss, relation_loss)?;
             }
+            loss = add_negative_logsumexp_loss(
+                &mut session,
+                loss,
+                outputs.set,
+                config.batch_size,
+                config.negative_logsumexp_loss_weight,
+            )?;
             let loss_value = session.tensor_values(loss)?[0];
             let report = session.tensor_backward(loss)?;
             optimizer.step(&mut session, &report)?;
@@ -438,6 +515,8 @@ struct Evaluation {
 struct AbstentionSample {
     atlas: String,
     correct: bool,
+    expected_kind: BoardKind,
+    strongest_is_set: bool,
     action: RawBoardAction,
     decision: BoardDecision,
 }
@@ -772,6 +851,8 @@ fn evaluate(
         abstention_samples.push(AbstentionSample {
             atlas: atlases.name(board.atlas_index).to_string(),
             correct,
+            expected_kind: board.kind,
+            strongest_is_set: board.set_targets.get(best).copied() == Some(1.0),
             action,
             decision,
         });
@@ -1228,14 +1309,16 @@ fn write_abstention_samples(
     let mut writer = std::io::BufWriter::new(file);
     writeln!(
         writer,
-        "atlas\tcorrect\taction\tscore\tscore_margin\tmean_attribute_entropy\tmin_attribute_margin"
+        "atlas\tcorrect\texpected_kind\tstrongest_is_set\taction\tscore\tscore_margin\tmean_attribute_entropy\tmin_attribute_margin"
     )?;
     for sample in samples {
         writeln!(
             writer,
-            "{}\t{}\t{:?}\t{:.12}\t{:.12}\t{:.12}\t{:.12}",
+            "{}\t{}\t{:?}\t{}\t{:?}\t{:.12}\t{:.12}\t{:.12}\t{:.12}",
             sample.atlas,
             u8::from(sample.correct),
+            sample.expected_kind,
+            u8::from(sample.strongest_is_set),
             sample.action,
             sample.decision.score,
             sample.decision.score_margin,

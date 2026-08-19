@@ -20,6 +20,7 @@ pub(crate) struct TrainConfig {
     pub(crate) learning_rate: f64,
     pub(crate) attribute_loss_weight: f64,
     pub(crate) relation_loss_weight: f64,
+    pub(crate) negative_logsumexp_loss_weight: f64,
     pub(crate) seed: u64,
     pub(crate) eval_only: bool,
     pub(crate) probe_only: bool,
@@ -30,6 +31,8 @@ pub(crate) struct TrainConfig {
     pub(crate) augment: bool,
     pub(crate) typed_relations: bool,
     pub(crate) mixed_boards: bool,
+    pub(crate) board_correlated_negatives: bool,
+    pub(crate) wide_vision: bool,
 }
 
 impl Default for TrainConfig {
@@ -53,6 +56,7 @@ impl Default for TrainConfig {
             learning_rate: 8.0e-4,
             attribute_loss_weight: 0.35,
             relation_loss_weight: 1.0,
+            negative_logsumexp_loss_weight: 0.0,
             seed: 0x5e7_2026,
             eval_only: false,
             probe_only: false,
@@ -63,6 +67,8 @@ impl Default for TrainConfig {
             augment: true,
             typed_relations: false,
             mixed_boards: false,
+            board_correlated_negatives: false,
+            wide_vision: false,
         }
     }
 }
@@ -87,6 +93,9 @@ impl TrainConfig {
                 "--relation-loss-weight" => {
                     config.relation_loss_weight = parse_value(&mut args, &flag)?;
                 }
+                "--negative-logsumexp-loss-weight" => {
+                    config.negative_logsumexp_loss_weight = parse_value(&mut args, &flag)?;
+                }
                 "--seed" => config.seed = parse_value(&mut args, &flag)?,
                 "--eval-only" => config.eval_only = true,
                 "--probe-only" => config.probe_only = true,
@@ -97,6 +106,8 @@ impl TrainConfig {
                 "--no-augment" => config.augment = false,
                 "--typed-relations" => config.typed_relations = true,
                 "--mixed-boards" => config.mixed_boards = true,
+                "--board-correlated-negatives" => config.board_correlated_negatives = true,
+                "--wide-vision" => config.wide_vision = true,
                 "--atlas-dir" => config.atlas_dir = PathBuf::from(next_value(&mut args, &flag)?),
                 "--validation-atlas-dir" => {
                     config.validation_atlas_dir = PathBuf::from(next_value(&mut args, &flag)?);
@@ -145,8 +156,25 @@ impl TrainConfig {
         if config.learning_rate <= 0.0
             || config.attribute_loss_weight < 0.0
             || config.relation_loss_weight < 0.0
+            || !config.negative_logsumexp_loss_weight.is_finite()
+            || config.negative_logsumexp_loss_weight < 0.0
         {
             return Err("learning rate must be positive and loss weights non-negative".to_string());
+        }
+        if config.negative_logsumexp_loss_weight > 0.0 && !config.typed_relations {
+            return Err("--negative-logsumexp-loss-weight requires --typed-relations".to_string());
+        }
+        if config.negative_logsumexp_loss_weight > 0.0 && config.batch_size % 2 != 0 {
+            return Err("--negative-logsumexp-loss-weight requires an even batch size".to_string());
+        }
+        if config.board_correlated_negatives && config.negative_logsumexp_loss_weight == 0.0 {
+            return Err(
+                "--board-correlated-negatives requires --negative-logsumexp-loss-weight"
+                    .to_string(),
+            );
+        }
+        if config.wide_vision && !config.typed_relations {
+            return Err("--wide-vision requires --typed-relations".to_string());
         }
         config.validate_ensemble_options()?;
         Ok(Some(config))
@@ -244,7 +272,8 @@ impl TrainConfig {
     pub(crate) fn usage() -> &'static str {
         "Usage: cargo run --release -- [--steps N] [--batch-size N] \
          [--learning-rate RATE] [--attribute-loss-weight WEIGHT] [--seed N] [--atlas-dir PATH] \
-         [--relation-loss-weight WEIGHT] [--typed-relations] [--mixed-boards] \
+         [--relation-loss-weight WEIGHT] [--negative-logsumexp-loss-weight WEIGHT] \
+         [--typed-relations] [--mixed-boards] [--board-correlated-negatives] [--wide-vision] \
          [--validation-atlas-dir PATH] [--output-dir PATH] [--eval-only] \
          [--ensemble-output-dir PATH] \
          [--ensemble-third-output-dir PATH] \
@@ -345,6 +374,10 @@ mod tests {
             "--mixed-boards",
             "--relation-loss-weight",
             "1.5",
+            "--negative-logsumexp-loss-weight",
+            "2.0",
+            "--board-correlated-negatives",
+            "--wide-vision",
         ]
         .into_iter()
         .map(str::to_string);
@@ -355,6 +388,36 @@ mod tests {
         assert!(config.typed_relations);
         assert!(config.mixed_boards);
         assert!((config.relation_loss_weight - 1.5).abs() < f64::EPSILON);
+        assert!((config.negative_logsumexp_loss_weight - 2.0).abs() < f64::EPSILON);
+        assert!(config.board_correlated_negatives);
+        assert!(config.wide_vision);
+    }
+
+    #[test]
+    fn negative_logsumexp_loss_requires_typed_relations_and_even_batch() {
+        let untyped = ["--negative-logsumexp-loss-weight", "1.0"]
+            .into_iter()
+            .map(str::to_string);
+        assert!(TrainConfig::from_iter(untyped).is_err());
+
+        let odd = [
+            "--typed-relations",
+            "--negative-logsumexp-loss-weight",
+            "1.0",
+            "--batch-size",
+            "63",
+        ]
+        .into_iter()
+        .map(str::to_string);
+        assert!(TrainConfig::from_iter(odd).is_err());
+
+        let missing_loss = ["--typed-relations", "--board-correlated-negatives"]
+            .into_iter()
+            .map(str::to_string);
+        assert!(TrainConfig::from_iter(missing_loss).is_err());
+
+        let untyped_wide = ["--wide-vision"].into_iter().map(str::to_string);
+        assert!(TrainConfig::from_iter(untyped_wide).is_err());
     }
 
     #[test]

@@ -15,8 +15,10 @@ pub const BATCH_SIZE: usize = 64;
 const CARD_COUNT: usize = BATCH_SIZE * 3;
 const SHARED_CHANNELS: usize = 12;
 const HEAD_CHANNELS: usize = 8;
-const HEAD_FEATURES: usize = HEAD_CHANNELS * 6 * 8;
 const HEAD_EMBED: usize = 24;
+const WIDE_SHARED_CHANNELS: usize = 24;
+const WIDE_HEAD_CHANNELS: usize = 16;
+const WIDE_HEAD_EMBED: usize = 48;
 
 pub struct Parameter {
     pub name: String,
@@ -220,8 +222,29 @@ impl Builder {
 }
 
 impl PolicyGraph {
-    pub fn new(init_seed: u64, typed_relations: bool) -> Self {
+    pub fn new(
+        init_seed: u64,
+        typed_relations: bool,
+        negative_logsumexp_loss_weight: f32,
+        wide_vision: bool,
+    ) -> Self {
         let mut builder = Builder::new(init_seed);
+        let shared_channels = if wide_vision {
+            WIDE_SHARED_CHANNELS
+        } else {
+            SHARED_CHANNELS
+        };
+        let head_channels = if wide_vision {
+            WIDE_HEAD_CHANNELS
+        } else {
+            HEAD_CHANNELS
+        };
+        let head_embed = if wide_vision {
+            WIDE_HEAD_EMBED
+        } else {
+            HEAD_EMBED
+        };
+        let head_features = head_channels * 6 * 8;
         let pixels = builder.placeholder(&[CARD_COUNT, CHANNELS, CARD_HEIGHT, CARD_WIDTH]);
         let set_labels = builder.placeholder(&[BATCH_SIZE, 2]);
         let attribute_labels =
@@ -234,7 +257,7 @@ impl PolicyGraph {
             &pixels,
             ConvolutionSpec {
                 input_channels: CHANNELS,
-                output_channels: SHARED_CHANNELS,
+                output_channels: shared_channels,
                 kernel: 5,
                 stride: 2,
                 padding: 2,
@@ -249,8 +272,8 @@ impl PolicyGraph {
                 &format!("{prefix}.local_convolution"),
                 &shared,
                 ConvolutionSpec {
-                    input_channels: SHARED_CHANNELS,
-                    output_channels: HEAD_CHANNELS,
+                    input_channels: shared_channels,
+                    output_channels: head_channels,
                     kernel: 3,
                     stride: 2,
                     padding: 1,
@@ -261,8 +284,8 @@ impl PolicyGraph {
                 &format!("{prefix}.dilated_residual_convolution"),
                 &encoded,
                 ConvolutionSpec {
-                    input_channels: HEAD_CHANNELS,
-                    output_channels: HEAD_CHANNELS,
+                    input_channels: head_channels,
+                    output_channels: head_channels,
                     kernel: 3,
                     stride: 1,
                     padding: 2,
@@ -271,18 +294,18 @@ impl PolicyGraph {
             );
             let encoded = builder.add(&encoded, &residual);
             let encoded = builder.activation(&encoded);
-            let encoded = builder.reshape(&encoded, &[CARD_COUNT, HEAD_FEATURES]);
+            let encoded = builder.reshape(&encoded, &[CARD_COUNT, head_features]);
             let encoded = builder.linear(
                 &format!("{prefix}.projection"),
                 &encoded,
-                HEAD_FEATURES,
-                HEAD_EMBED,
+                head_features,
+                head_embed,
             );
             let encoded = builder.activation(&encoded);
             heads.push(builder.linear(
                 &format!("{prefix}.classifier"),
                 &encoded,
-                HEAD_EMBED,
+                head_embed,
                 ATTRIBUTE_VALUE_COUNT,
             ));
         }
@@ -396,6 +419,71 @@ impl PolicyGraph {
                     )
             };
             loss = builder.add(&loss, &relation_loss);
+        }
+        if negative_logsumexp_loss_weight > 0.0 {
+            let negative_logits = unsafe {
+                builder.graph.sliceTensor_dimension_start_length_name(
+                    &set_logits,
+                    0,
+                    (BATCH_SIZE / 2).cast_signed(),
+                    (BATCH_SIZE / 2).cast_signed(),
+                    None,
+                )
+            };
+            let negative_exponentials = unsafe {
+                builder
+                    .graph
+                    .exponentWithTensor_name(&negative_logits, None)
+            };
+            let negative_exponential_sum = unsafe {
+                builder
+                    .graph
+                    .reductionSumWithTensor_axis_name(&negative_exponentials, 0, None)
+            };
+            let negative_logsumexp = unsafe {
+                builder
+                    .graph
+                    .logarithmWithTensor_name(&negative_exponential_sum, None)
+            };
+            let negative_logsumexp = builder.reshape(&negative_logsumexp, &[1, 1]);
+            let zero = unsafe {
+                builder.graph.constantWithScalar_shape_dataType(
+                    0.0,
+                    &shape(&[1, 1]),
+                    MPSDataType::Float32,
+                )
+            };
+            let aggregate_classes = builder.concat(&[&zero, &negative_logsumexp], 1);
+            let negative_label = unsafe {
+                builder.graph.sliceTensor_dimension_start_length_name(
+                    &set_labels,
+                    0,
+                    (BATCH_SIZE / 2).cast_signed(),
+                    1,
+                    None,
+                )
+            };
+            let aggregate_loss = unsafe {
+                builder
+                    .graph
+                    .softMaxCrossEntropyWithSourceTensor_labelsTensor_axis_reductionType_name(
+                        &aggregate_classes,
+                        &negative_label,
+                        1,
+                        MPSGraphLossReductionType::Mean,
+                        None,
+                    )
+            };
+            let weight = unsafe {
+                builder
+                    .graph
+                    .constantWithScalar_dataType(
+                        f64::from(negative_logsumexp_loss_weight),
+                        MPSDataType::Float32,
+                    )
+            };
+            let weighted_aggregate = builder.mul(&aggregate_loss, &weight);
+            loss = builder.add(&loss, &weighted_aggregate);
         }
 
         let parameter_tensors = builder

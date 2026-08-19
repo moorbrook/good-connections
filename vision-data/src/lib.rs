@@ -118,14 +118,98 @@ impl AtlasCollection {
     }
 
     pub fn make_batch(&self, rng: &mut Rng, size: usize, augment: bool) -> Batch {
-        self.make_batch_with_sampling(rng, size, augment, false)
+        self.make_batch_with_sampling(rng, size, augment, false, false)
     }
 
     /// Make a training batch with seed-stratified atlas sampling. This is a
     /// training-only path; evaluation and probe callers should use
     /// [`Self::make_batch`] to retain the locked evaluator stream.
     pub fn make_training_batch(&self, rng: &mut Rng, size: usize, augment: bool) -> Batch {
-        self.make_batch_with_sampling(rng, size, augment, true)
+        self.make_batch_with_sampling(rng, size, augment, true, false)
+    }
+
+    /// Make a seed-stratified training batch with positive triples first and
+    /// negative triples second. The grouped layout lets a differentiable
+    /// log-sum-exp loss address aggregate false-positive mass directly.
+    pub fn make_grouped_training_batch(&self, rng: &mut Rng, size: usize, augment: bool) -> Batch {
+        self.make_batch_with_sampling(rng, size, augment, true, true)
+    }
+
+    /// Make a grouped training batch whose negative half consists of
+    /// combinations from one twelve-card no-SET board rendered with one atlas.
+    /// This matches the correlation structure of board evaluation while the
+    /// positive half retains seed-stratified triple sampling.
+    pub fn make_board_correlated_training_batch(
+        &self,
+        rng: &mut Rng,
+        size: usize,
+        augment: bool,
+    ) -> Batch {
+        let positive_count = size / 2;
+        let negative_count = size - positive_count;
+        let seed_offset = rng.next_u64();
+        let board_ids = sample_board_ids(rng, 12, BoardKind::NoSet);
+        let mut board_triples = Vec::with_capacity(220);
+        for first in 0..board_ids.len() - 2 {
+            for second in first + 1..board_ids.len() - 1 {
+                for third in second + 1..board_ids.len() {
+                    board_triples.push([board_ids[first], board_ids[second], board_ids[third]]);
+                }
+            }
+        }
+        for index in 0..negative_count.min(board_triples.len()) {
+            let replacement = index + rng.index(board_triples.len() - index);
+            board_triples.swap(index, replacement);
+        }
+        let negative_theme_group = rng.index(self.sampling_groups.len());
+        let negative_raster_group = rng.index(self.sampling_groups[negative_theme_group].len());
+        let negative_theme = sample_seed_stratified_atlas(
+            rng,
+            &self.seed_sampling_groups[negative_theme_group][negative_raster_group],
+            positive_count,
+            seed_offset,
+        );
+
+        let mut pixels = Vec::with_capacity(size * 3 * CARD_PIXELS);
+        let mut set_targets = Vec::with_capacity(size);
+        let mut attribute_targets = Vec::with_capacity(size * 3 * 4);
+        let mut relation_targets = Vec::with_capacity(size * 4);
+        let mut atlas_indices = Vec::with_capacity(size);
+        for sample in 0..size {
+            let is_set = sample < positive_count;
+            let mut ids = if is_set {
+                positive_triple(rng)
+            } else {
+                board_triples[(sample - positive_count) % board_triples.len()]
+            };
+            shuffle_three(rng, &mut ids);
+            let theme = if is_set {
+                let theme_group = rng.index(self.sampling_groups.len());
+                let raster_group = rng.index(self.sampling_groups[theme_group].len());
+                sample_seed_stratified_atlas(
+                    rng,
+                    &self.seed_sampling_groups[theme_group][raster_group],
+                    sample,
+                    seed_offset,
+                )
+            } else {
+                negative_theme
+            };
+            atlas_indices.push(theme);
+            for id in ids {
+                append_card(&mut pixels, &self.cards[theme][id], rng, augment);
+                attribute_targets.extend(decode_card(id).map(|value| ATTRIBUTE_VALUES[value]));
+            }
+            relation_targets.extend(relation_targets_for_triple(ids));
+            set_targets.push(f64::from(is_set));
+        }
+        Batch {
+            pixels,
+            set_targets,
+            attribute_targets,
+            relation_targets,
+            atlas_indices,
+        }
     }
 
     fn make_batch_with_sampling(
@@ -134,6 +218,7 @@ impl AtlasCollection {
         size: usize,
         augment: bool,
         seed_stratified: bool,
+        grouped_by_label: bool,
     ) -> Batch {
         let mut pixels = Vec::with_capacity(size * 3 * CARD_PIXELS);
         let mut set_targets = Vec::with_capacity(size);
@@ -141,12 +226,22 @@ impl AtlasCollection {
         let mut relation_targets = Vec::with_capacity(size * 4);
         let mut atlas_indices = Vec::with_capacity(size);
         let seed_offset = if seed_stratified { rng.next_u64() } else { 0 };
+        let positive_count = size / 2;
 
         for sample in 0..size {
-            let is_set = sample % 2 == 0;
+            let is_set = if grouped_by_label {
+                sample < positive_count
+            } else {
+                sample % 2 == 0
+            };
+            let negative_index = if grouped_by_label {
+                sample.saturating_sub(positive_count)
+            } else {
+                sample / 2
+            };
             let mut ids = if is_set {
                 positive_triple(rng)
-            } else if sample % 8 != 7 {
+            } else if negative_index % 4 != 3 {
                 hard_negative_triple(rng)
             } else {
                 negative_triple(rng)
@@ -193,18 +288,7 @@ impl AtlasCollection {
         card_count: usize,
         kind: BoardKind,
     ) -> BoardBatch {
-        let ids = loop {
-            let mut deck = (0..DECK_SIZE).collect::<Vec<_>>();
-            for index in 0..card_count {
-                let replacement = index + rng.index(DECK_SIZE - index);
-                deck.swap(index, replacement);
-            }
-            deck.truncate(card_count);
-            let has_set = board_has_set(&deck);
-            if has_set == (kind == BoardKind::HasSet) {
-                break deck;
-            }
-        };
+        let ids = sample_board_ids(rng, card_count, kind);
         let theme = rng.index(self.cards.len());
         let triple_count = card_count * (card_count - 1) * (card_count - 2) / 6;
         let mut pixels = Vec::with_capacity(card_count * CARD_PIXELS);
@@ -286,6 +370,20 @@ fn board_has_set(ids: &[usize]) -> bool {
         }
     }
     false
+}
+
+fn sample_board_ids(rng: &mut Rng, card_count: usize, kind: BoardKind) -> Vec<usize> {
+    loop {
+        let mut deck = (0..DECK_SIZE).collect::<Vec<_>>();
+        for index in 0..card_count {
+            let replacement = index + rng.index(DECK_SIZE - index);
+            deck.swap(index, replacement);
+        }
+        deck.truncate(card_count);
+        if board_has_set(&deck) == (kind == BoardKind::HasSet) {
+            return deck;
+        }
+    }
 }
 
 pub fn relation_targets_for_triple(ids: [usize; 3]) -> [f64; 4] {
@@ -784,7 +882,7 @@ mod tests {
         let mut explicit_legacy_rng = Rng::new(0x5eed);
         let legacy = collection.make_batch(&mut legacy_rng, 12, false);
         let explicit_legacy =
-            collection.make_batch_with_sampling(&mut explicit_legacy_rng, 12, false, false);
+            collection.make_batch_with_sampling(&mut explicit_legacy_rng, 12, false, false, false);
         assert_eq!(legacy.pixels, explicit_legacy.pixels);
         assert_eq!(legacy.set_targets, explicit_legacy.set_targets);
         assert_eq!(legacy.attribute_targets, explicit_legacy.attribute_targets);
@@ -809,6 +907,38 @@ mod tests {
             3
         );
         assert_eq!(second_cycle, first_cycle);
+    }
+
+    #[test]
+    fn grouped_training_batch_places_all_negatives_in_second_half() {
+        let collection = fixture_collection();
+        let mut rng = Rng::new(0x5eed);
+        let batch = collection.make_grouped_training_batch(&mut rng, 10, false);
+        assert_eq!(&batch.set_targets[..5], &[1.0; 5]);
+        assert_eq!(&batch.set_targets[5..], &[0.0; 5]);
+    }
+
+    #[test]
+    fn board_correlated_negatives_share_one_board_and_atlas() {
+        let collection = fixture_collection();
+        let mut rng = Rng::new(0x5eed);
+        let batch = collection.make_board_correlated_training_batch(&mut rng, 64, false);
+        assert_eq!(&batch.set_targets[..32], &[1.0; 32]);
+        assert_eq!(&batch.set_targets[32..], &[0.0; 32]);
+        assert!(
+            batch.atlas_indices[32..]
+                .iter()
+                .all(|&atlas| atlas == batch.atlas_indices[32])
+        );
+
+        let negative_attributes = &batch.attribute_targets[32 * 3 * 4..];
+        let (cards, remainder) = negative_attributes.as_chunks::<4>();
+        assert_eq!(remainder, []);
+        let unique_ids = cards
+            .iter()
+            .map(|attributes| attributes.map(f64::to_bits))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(unique_ids.len() <= 12);
     }
 
     fn fixture_collection() -> AtlasCollection {

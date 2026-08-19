@@ -14,6 +14,9 @@ pub const ATTRIBUTE_RELATION_DIM: usize = 32;
 pub const RELATION_DIM: usize = 16;
 const CONV_CHANNELS: usize = 12;
 const SPECIALIST_CHANNELS: usize = 8;
+const WIDE_CONV_CHANNELS: usize = 24;
+const WIDE_SPECIALIST_CHANNELS: usize = 16;
+const WIDE_SPECIALIST_EMBED_DIM: usize = 48;
 const CONV_OUTPUT_HEIGHT: usize = 6;
 const CONV_OUTPUT_WIDTH: usize = 8;
 const SPECIALIST_FEATURES: usize = SPECIALIST_CHANNELS * CONV_OUTPUT_HEIGHT * CONV_OUTPUT_WIDTH;
@@ -208,6 +211,7 @@ impl Module for DeployedAttributeHead {
             session,
             encoded,
             card_count,
+            SPECIALIST_FEATURES,
             &self.projection,
             &self.classifier,
         )
@@ -229,20 +233,26 @@ impl Module for DeployedAttributeHead {
     }
 }
 
-struct ResearchAttributeHead {
+struct ResearchAttributeHead<
+    const SHARED_CHANNELS: usize,
+    const HEAD_CHANNELS: usize,
+    const EMBED_DIM: usize,
+> {
     local_convolution: Conv2d,
     dilated_residual_convolution: Conv2d,
     projection: Linear,
     classifier: Linear,
 }
 
-impl ResearchAttributeHead {
+impl<const SHARED_CHANNELS: usize, const HEAD_CHANNELS: usize, const EMBED_DIM: usize>
+    ResearchAttributeHead<SHARED_CHANNELS, HEAD_CHANNELS, EMBED_DIM>
+{
     fn new(session: &mut FrankenTorchSession) -> Result<Self, AutogradError> {
         Ok(Self {
             local_convolution: Conv2d::new(
                 session,
-                CONV_CHANNELS,
-                SPECIALIST_CHANNELS,
+                SHARED_CHANNELS,
+                HEAD_CHANNELS,
                 (3, 3),
                 (2, 2),
                 (1, 1),
@@ -250,16 +260,21 @@ impl ResearchAttributeHead {
             )?,
             dilated_residual_convolution: Conv2d::new(
                 session,
-                SPECIALIST_CHANNELS,
-                SPECIALIST_CHANNELS,
+                HEAD_CHANNELS,
+                HEAD_CHANNELS,
                 (3, 3),
                 (1, 1),
                 (2, 2),
                 true,
             )?
             .dilation((2, 2)),
-            projection: Linear::new(session, SPECIALIST_FEATURES, SPECIALIST_EMBED_DIM, true)?,
-            classifier: Linear::new(session, SPECIALIST_EMBED_DIM, ATTRIBUTE_VALUE_COUNT, true)?,
+            projection: Linear::new(
+                session,
+                HEAD_CHANNELS * CONV_OUTPUT_HEIGHT * CONV_OUTPUT_WIDTH,
+                EMBED_DIM,
+                true,
+            )?,
+            classifier: Linear::new(session, EMBED_DIM, ATTRIBUTE_VALUE_COUNT, true)?,
         })
     }
 }
@@ -268,17 +283,20 @@ fn finish_attribute_head(
     session: &mut FrankenTorchSession,
     encoded: TensorNodeId,
     card_count: usize,
+    specialist_features: usize,
     projection: &Linear,
     classifier: &Linear,
 ) -> Result<TensorNodeId, AutogradError> {
     let encoded = session.tensor_gelu(encoded)?;
-    let encoded = session.tensor_reshape(encoded, vec![card_count, SPECIALIST_FEATURES])?;
+    let encoded = session.tensor_reshape(encoded, vec![card_count, specialist_features])?;
     let encoded = projection.forward(session, encoded)?;
     let encoded = session.tensor_gelu(encoded)?;
     classifier.forward(session, encoded)
 }
 
-impl Module for ResearchAttributeHead {
+impl<const SHARED_CHANNELS: usize, const HEAD_CHANNELS: usize, const EMBED_DIM: usize> Module
+    for ResearchAttributeHead<SHARED_CHANNELS, HEAD_CHANNELS, EMBED_DIM>
+{
     fn forward(
         &self,
         session: &mut FrankenTorchSession,
@@ -292,6 +310,7 @@ impl Module for ResearchAttributeHead {
             session,
             encoded,
             card_count,
+            HEAD_CHANNELS * CONV_OUTPUT_HEIGHT * CONV_OUTPUT_WIDTH,
             &self.projection,
             &self.classifier,
         )
@@ -320,7 +339,7 @@ impl Module for ResearchAttributeHead {
 /// Shared topology-independent implementation for the deployed and research
 /// policy wrappers. The wrapper's attribute-head type determines the exported
 /// state-dict key family, so strict loading cannot silently mix topologies.
-struct PolicyCore<H, const RELATION_CLASSES: usize> {
+struct PolicyCore<H, const RELATION_CLASSES: usize, const SHARED_CHANNELS: usize> {
     shared_convolution: Conv2d,
     attribute_heads: [H; ATTRIBUTE_COUNT],
     attribute_relation_in: Linear,
@@ -329,7 +348,9 @@ struct PolicyCore<H, const RELATION_CLASSES: usize> {
     set_relation_out: Linear,
 }
 
-impl<H: Module, const RELATION_CLASSES: usize> PolicyCore<H, RELATION_CLASSES> {
+impl<H: Module, const RELATION_CLASSES: usize, const SHARED_CHANNELS: usize>
+    PolicyCore<H, RELATION_CLASSES, SHARED_CHANNELS>
+{
     fn new<F>(session: &mut FrankenTorchSession, mut head_new: F) -> Result<Self, AutogradError>
     where
         F: FnMut(&mut FrankenTorchSession) -> Result<H, AutogradError>,
@@ -338,7 +359,7 @@ impl<H: Module, const RELATION_CLASSES: usize> PolicyCore<H, RELATION_CLASSES> {
             shared_convolution: Conv2d::new(
                 session,
                 CHANNELS,
-                CONV_CHANNELS,
+                SHARED_CHANNELS,
                 (5, 5),
                 (2, 2),
                 (2, 2),
@@ -530,7 +551,9 @@ impl<H: Module, const RELATION_CLASSES: usize> PolicyCore<H, RELATION_CLASSES> {
     }
 }
 
-impl<H: Module, const RELATION_CLASSES: usize> Module for PolicyCore<H, RELATION_CLASSES> {
+impl<H: Module, const RELATION_CLASSES: usize, const SHARED_CHANNELS: usize> Module
+    for PolicyCore<H, RELATION_CLASSES, SHARED_CHANNELS>
+{
     fn forward(
         &self,
         session: &mut FrankenTorchSession,
@@ -575,7 +598,7 @@ impl<H: Module, const RELATION_CLASSES: usize> Module for PolicyCore<H, RELATION
 /// `attribute_head_N.convolution.*` keys and the original single-convolution
 /// specialist topology.
 pub struct DeployedVisualSetPolicy {
-    core: PolicyCore<DeployedAttributeHead, 1>,
+    core: PolicyCore<DeployedAttributeHead, 1, CONV_CHANNELS>,
 }
 
 impl fmt::Debug for DeployedVisualSetPolicy {
@@ -637,7 +660,11 @@ impl Module for DeployedVisualSetPolicy {
 /// `attribute_head_N.local_convolution.*` and
 /// `attribute_head_N.dilated_residual_convolution.*` keys.
 pub struct ResearchVisualSetPolicy {
-    core: PolicyCore<ResearchAttributeHead, 1>,
+    core: PolicyCore<
+        ResearchAttributeHead<CONV_CHANNELS, SPECIALIST_CHANNELS, SPECIALIST_EMBED_DIM>,
+        1,
+        CONV_CHANNELS,
+    >,
 }
 
 /// V9 research policy with explicit `same`, `different`, and `invalid`
@@ -645,7 +672,27 @@ pub struct ResearchVisualSetPolicy {
 /// probabilities feed the final SET scorer without a discrete operation in
 /// the training graph.
 pub struct TypedRelationResearchPolicy {
-    core: PolicyCore<ResearchAttributeHead, RELATION_CLASS_COUNT>,
+    core: PolicyCore<
+        ResearchAttributeHead<CONV_CHANNELS, SPECIALIST_CHANNELS, SPECIALIST_EMBED_DIM>,
+        RELATION_CLASS_COUNT,
+        CONV_CHANNELS,
+    >,
+}
+
+/// V9 width-search candidate. It keeps the typed relation and SET heads but
+/// doubles the shared channels, specialist channels, and specialist embedding
+/// width. The distinct Rust type and strict tensor shapes prevent accidental
+/// loading as the standard research policy.
+pub struct WideTypedRelationResearchPolicy {
+    core: PolicyCore<
+        ResearchAttributeHead<
+            WIDE_CONV_CHANNELS,
+            WIDE_SPECIALIST_CHANNELS,
+            WIDE_SPECIALIST_EMBED_DIM,
+        >,
+        RELATION_CLASS_COUNT,
+        WIDE_CONV_CHANNELS,
+    >,
 }
 
 impl fmt::Debug for TypedRelationResearchPolicy {
@@ -680,6 +727,69 @@ impl TypedRelationResearchPolicy {
         card_count: usize,
     ) -> Result<BoardScores, PolicyError> {
         self.core.score_board(session, pixels, card_count)
+    }
+}
+
+impl fmt::Debug for WideTypedRelationResearchPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WideTypedRelationResearchPolicy")
+            .field("input", &(CARD_HEIGHT, CARD_WIDTH, CHANNELS))
+            .field("shared_channels", &WIDE_CONV_CHANNELS)
+            .field("specialist_channels", &WIDE_SPECIALIST_CHANNELS)
+            .field("specialist_embedding_width", &WIDE_SPECIALIST_EMBED_DIM)
+            .field("relation_classes", &RELATION_CLASS_COUNT)
+            .finish_non_exhaustive()
+    }
+}
+
+impl WideTypedRelationResearchPolicy {
+    pub fn new(session: &mut FrankenTorchSession) -> Result<Self, AutogradError> {
+        Ok(Self {
+            core: PolicyCore::new(
+                session,
+                ResearchAttributeHead::<
+                    WIDE_CONV_CHANNELS,
+                    WIDE_SPECIALIST_CHANNELS,
+                    WIDE_SPECIALIST_EMBED_DIM,
+                >::new,
+            )?,
+        })
+    }
+
+    pub fn forward_with_relations(
+        &self,
+        session: &mut FrankenTorchSession,
+        input: TensorNodeId,
+    ) -> Result<(TensorNodeId, TensorNodeId, TensorNodeId), AutogradError> {
+        self.core.forward_with_relations(session, input)
+    }
+
+    pub fn score_board(
+        &self,
+        session: &mut FrankenTorchSession,
+        pixels: Vec<f64>,
+        card_count: usize,
+    ) -> Result<BoardScores, PolicyError> {
+        self.core.score_board(session, pixels, card_count)
+    }
+}
+
+impl Module for WideTypedRelationResearchPolicy {
+    fn forward(
+        &self,
+        session: &mut FrankenTorchSession,
+        input: TensorNodeId,
+    ) -> Result<TensorNodeId, AutogradError> {
+        self.core.forward(session, input)
+    }
+
+    fn parameters(&self) -> Vec<TensorNodeId> {
+        self.core.parameters()
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module)> {
+        self.core.named_children()
     }
 }
 
@@ -765,6 +875,7 @@ mod tests {
     use super::{
         ATTRIBUTE_COUNT, BoardScores, CARD_PIXELS, DeployedVisualSetPolicy, PolicyError,
         RawBoardAction, ResearchVisualSetPolicy, TypedRelationResearchPolicy,
+        WideTypedRelationResearchPolicy,
     };
 
     #[test]
@@ -917,6 +1028,16 @@ mod tests {
         assert!(
             research
                 .load_state_dict(&mut research_session, &typed_state, true)
+                .is_err()
+        );
+
+        let mut wide_session = FrankenTorchSession::new(ExecutionMode::Strict);
+        let wide = WideTypedRelationResearchPolicy::new(&mut wide_session)?;
+        let wide_state = wide.state_dict(&wide_session)?;
+        assert_eq!(wide.parameters().len(), typed.parameters().len());
+        assert!(
+            typed
+                .load_state_dict(&mut typed_session, &wide_state, true)
                 .is_err()
         );
         Ok(())

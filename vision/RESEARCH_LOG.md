@@ -601,3 +601,60 @@ produced loss `6.396099` in MPSGraph and `6.396099628` after strict checkpoint
 loading in FrankenTorch, with matching first-layer gradients. Architecture
 development will use only exposed v8 data before fresh v9 corpus seeds and
 gates are locked. Full design details are in `BOARD_V9_PLAN.md`.
+
+**Typed single-model development baseline.** A 20,000-step MPSGraph run on the
+exposed v8 training corpus reached 99.3286% typed-relation accuracy, but only
+89.7461% mixed raw-board accuracy: 97.2168% on boards with a SET and 82.2754%
+on no-SET boards. This is a rejected development result, not a v9 candidate.
+The gap is an extreme-value failure: a no-SET action is correct only when all
+220 invalid triples remain below the decision boundary. A post-hoc sweep of
+the raw SET-logit threshold peaked at 95.8984% mixed accuracy, so static
+calibration is also rejected. The next experiment directly penalizes the
+log-sum-exp aggregate of negative logits in each grouped training batch.
+
+**Negative log-sum-exp development sweep.** MPSGraph's exact maximum reduction
+compiled but its gradient is not implemented on the tested Apple stack, so the
+experiment uses a smooth log-sum-exp aggregate and names it accordingly. A
+one-step checkpoint matched FrankenTorch at loss `9.607542154` and matching
+first-layer gradients. At 10,000 steps, fixed-seed 2,048-board results were:
+
+| Weight | Mixed | Has SET | No SET |
+| ---: | ---: | ---: | ---: |
+| 0.25 | 92.0898% | 96.9727% | 87.2070% |
+| 1.00 | 94.2871% | 97.1680% | 91.4062% |
+| 1.50 | 95.2148% | 97.3633% | 93.0664% |
+| 2.00 | 95.9473% | 97.1680% | 94.7266% |
+| 2.50 | **96.9238%** | 97.1680% | 96.6797% |
+| 3.00 | 96.7285% | 96.1914% | 97.2656% |
+| 4.00 | 89.2578% | 79.6875% | 98.8281% |
+
+The balanced development choice is weight 2.5. On the larger identical 4,096
+board stream, its 10,000-step checkpoint scored 96.2891%, while a 20,000-step
+checkpoint scored 96.2402%; optimization depth did not remove the remaining
+error. Their uniform ensemble reached 96.8018%.
+
+**Rejected board-correlation sampler.** Grouping the negative half of every
+batch as combinations from one real no-SET board and one atlas passed backend
+parity, but at 10,000 steps it fell to 89.3555% mixed accuracy (94.6289% Has
+SET, 84.0820% No SET) and reduced relation accuracy. One correlated board per
+batch sacrificed too much negative and raster diversity, so this sampler
+remains explicit and opt-in but is rejected as the next candidate.
+
+**Independent ensemble and width search.** Four independent 10,000-step
+replicas of the selected weight-2.5 objective scored 96.92%, 95.41%, 93.99%,
+and 95.26% on the same 2,048 boards. Their fixed uniform ensemble reached
+97.0703% overall, but was imbalanced at 95.2148% Has SET and 98.9258% No SET.
+An exact sweep using newly explicit `expected_kind` and `strongest_is_set`
+diagnostics peaked at 97.4121%, so the ensemble still has overlapping scores,
+not merely a shifted threshold. Mixing one lower-loss checkpoint reached only
+97.1191% after its best diagnostic threshold.
+
+A distinct wide typed policy then doubled shared channels (12 to 24),
+specialist channels (8 to 16), and specialist embedding width (24 to 48),
+raising parameters from 44,448 to 173,680. Strict shape loading and one-step
+MPSGraph/FrankenTorch parity passed. At weight 2.5 it improved attribute
+accuracy to 99.6460% and relation accuracy to 99.1455%, but mixed raw-board
+accuracy remained 96.2891% (97.6074% Has SET, 94.9707% No SET). Recalibrating
+the training loss at weight 3.0 declined to 95.9717%. Width is therefore
+rejected: the remaining bottleneck is the board-level action, not local visual
+capacity alone.

@@ -54,3 +54,26 @@ use explicit relation targets and the same differentiable typed topology.
    fixed balanced board allocations.
 4. Select on raw research accuracy only, then run one sealed assessment.
 
+The first development baseline answered step 1 negatively. Despite 99.3286%
+typed-relation accuracy, its mixed raw-board accuracy was 89.7461%, including
+82.2754% on no-SET boards. The best post-hoc static threshold reached only
+95.8984%. Step 2 therefore begins with a differentiable negative log-sum-exp
+loss: a training batch groups its negative triples, and an auxiliary binary
+loss controls their aggregate false-positive mass rather than only their mean.
+
+The fixed-seed 10,000-step weight sweep peaked at 96.9238% mixed accuracy for
+weight 2.5 on 2,048 exposed development boards. The same checkpoint scored
+96.2891% on 4,096 boards; extending to 20,000 steps scored 96.2402%, and their
+uniform ensemble scored 96.8018%. A follow-up sampler using combinations from
+one actual no-SET board per negative half was rejected at 89.3555%. The next
+development step tests independent replicas of the selected 2.5 objective,
+because the v8 work showed that independent visual errors can be reduced by a
+predeclared uniform ensemble.
+
+Four independent replicas reached 97.0703% as a uniform ensemble, and an exact
+threshold sweep reached only 97.4121%. A 173,680-parameter width candidate
+improved local attribute and relation metrics but tied the standard model at
+96.2891% mixed raw accuracy; a second loss weight was worse. Both routes are
+rejected. The next architecture experiment must give `NoSet` an explicit
+board-level learned output rather than deriving it solely from whether the
+largest of 220 independent triple logits crosses zero.

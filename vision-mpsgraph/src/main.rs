@@ -25,6 +25,7 @@ const DEFAULT_INIT_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 const LEARNING_RATE: f32 = 8.0e-4;
 const WEIGHT_DECAY: f32 = 1.0e-4;
 
+#[allow(clippy::struct_excessive_bools)]
 struct TrainConfig {
     steps: usize,
     output: Option<PathBuf>,
@@ -33,6 +34,9 @@ struct TrainConfig {
     data_seed: u64,
     init_seed: u64,
     typed_relations: bool,
+    negative_logsumexp_loss_weight: f32,
+    board_correlated_negatives: bool,
+    wide_vision: bool,
 }
 
 struct PreparedBatch {
@@ -293,6 +297,9 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
         data_seed: DEFAULT_DATA_SEED,
         init_seed: DEFAULT_INIT_SEED,
         typed_relations: false,
+        negative_logsumexp_loss_weight: 0.0,
+        board_correlated_negatives: false,
+        wide_vision: false,
     };
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -315,6 +322,14 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
             }
             "--no-augment" => config.augment = false,
             "--typed-relations" => config.typed_relations = true,
+            "--board-correlated-negatives" => config.board_correlated_negatives = true,
+            "--wide-vision" => config.wide_vision = true,
+            "--negative-logsumexp-loss-weight" => {
+                config.negative_logsumexp_loss_weight = arguments
+                    .next()
+                    .ok_or("--negative-logsumexp-loss-weight requires a value")?
+                    .parse::<f32>()?;
+            }
             "--data-seed" => {
                 config.data_seed = arguments
                     .next()
@@ -329,7 +344,7 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
             }
             unknown => {
                 return Err(format!(
-                    "unknown argument {unknown}; usage: [--steps N] [--output PATH] [--atlas-dir PATH] [--no-augment] [--typed-relations] [--data-seed N] [--init-seed N]"
+                    "unknown argument {unknown}; usage: [--steps N] [--output PATH] [--atlas-dir PATH] [--no-augment] [--typed-relations] [--negative-logsumexp-loss-weight W] [--board-correlated-negatives] [--wide-vision] [--data-seed N] [--init-seed N]"
                 )
                 .into());
             }
@@ -337,6 +352,22 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
     }
     if config.steps == 0 {
         return Err("steps must be positive".into());
+    }
+    if !config.negative_logsumexp_loss_weight.is_finite()
+        || config.negative_logsumexp_loss_weight < 0.0
+    {
+        return Err("negative-logsumexp loss weight must be finite and non-negative".into());
+    }
+    if config.negative_logsumexp_loss_weight > 0.0 && !config.typed_relations {
+        return Err("--negative-logsumexp-loss-weight requires --typed-relations".into());
+    }
+    if config.board_correlated_negatives && config.negative_logsumexp_loss_weight == 0.0 {
+        return Err(
+            "--board-correlated-negatives requires --negative-logsumexp-loss-weight".into(),
+        );
+    }
+    if config.wide_vision && !config.typed_relations {
+        return Err("--wide-vision requires --typed-relations".into());
     }
     Ok(config)
 }
@@ -462,8 +493,22 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("data_seed: {}", config.data_seed);
     println!("init_seed: {}", config.init_seed);
-    let mut policy = policy_graph::PolicyGraph::new(config.init_seed, config.typed_relations);
+    let mut policy = policy_graph::PolicyGraph::new(
+        config.init_seed,
+        config.typed_relations,
+        config.negative_logsumexp_loss_weight,
+        config.wide_vision,
+    );
     println!("typed_relations: {}", config.typed_relations);
+    println!(
+        "negative_logsumexp_loss_weight: {}",
+        config.negative_logsumexp_loss_weight
+    );
+    println!(
+        "board_correlated_negatives: {}",
+        config.board_correlated_negatives
+    );
+    println!("wide_vision: {}", config.wide_vision);
     let parameter_count = policy
         .parameters
         .iter()
@@ -479,7 +524,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|| repository.join("vision-artifacts/atlases"));
     let atlases = AtlasCollection::load(&atlas_dir)?;
     let mut rng = Rng::new(config.data_seed);
-    let probe = prepare_batch(&atlases.make_batch(&mut rng, policy_graph::BATCH_SIZE, false));
+    let probe_batch = if config.board_correlated_negatives {
+        atlases.make_board_correlated_training_batch(&mut rng, policy_graph::BATCH_SIZE, false)
+    } else if config.negative_logsumexp_loss_weight > 0.0 {
+        atlases.make_grouped_training_batch(&mut rng, policy_graph::BATCH_SIZE, false)
+    } else {
+        atlases.make_batch(&mut rng, policy_graph::BATCH_SIZE, false)
+    };
+    let probe = prepare_batch(&probe_batch);
     let compile_started = Instant::now();
     let (initial_probe_loss, _) = autoreleasepool(|_| run_policy(&policy, &device, &probe))?;
     let compile_elapsed = compile_started.elapsed();
@@ -499,11 +551,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     for step in 1..=steps {
         let started = Instant::now();
-        let batch = prepare_batch(&atlases.make_training_batch(
-            &mut rng,
-            policy_graph::BATCH_SIZE,
-            config.augment,
-        ));
+        let training_batch = if config.board_correlated_negatives {
+            atlases.make_board_correlated_training_batch(
+                &mut rng,
+                policy_graph::BATCH_SIZE,
+                config.augment,
+            )
+        } else if config.negative_logsumexp_loss_weight > 0.0 {
+            atlases.make_grouped_training_batch(
+                &mut rng,
+                policy_graph::BATCH_SIZE,
+                config.augment,
+            )
+        } else {
+            atlases.make_training_batch(&mut rng, policy_graph::BATCH_SIZE, config.augment)
+        };
+        let batch = prepare_batch(&training_batch);
         let (loss, gradients) = autoreleasepool(|_| run_policy(&policy, &device, &batch))?;
         let progress = (step - 1) as f32 / steps as f32;
         let cosine = 1.0_f32.midpoint((std::f32::consts::PI * progress).cos());
