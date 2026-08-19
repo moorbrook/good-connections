@@ -1,0 +1,28 @@
+[package]
+name = "set-vision-data"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+png = "0.17.16"
+set-vision-contract = { path = "../vision-contract" }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unimplemented = "deny"
+todo = "deny"
+dbg_macro = "deny"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"

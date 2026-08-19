@@ -1,0 +1,20 @@
+:root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 0; overflow-x: hidden; background: #0b1020; color: #eef3ff; }
+main { width: 100%; padding: 24px 18px; }
+.eyebrow { margin: 0; color: #23d5ab; font-size: 11px; font-weight: 800; letter-spacing: .16em; }
+h1 { margin: 5px 0 8px; font-size: 28px; letter-spacing: -.04em; }
+.lede { margin: 0 0 24px; color: #aeb9d4; line-height: 1.45; }
+label { display: grid; gap: 7px; margin: 14px 0; color: #cbd4ea; font-size: 12px; font-weight: 700; }
+input { width: 100%; border: 1px solid #334060; border-radius: 9px; background: #121a31; color: #fff; padding: 10px; font: inherit; }
+.actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-top: 18px; }
+button { min-width: 0; border: 1px solid #405073; border-radius: 10px; background: #18233f; color: #fff; padding: 11px 12px; font-weight: 750; cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: .4; }
+button.primary { border-color: #23d5ab; background: #147b6b; }
+button.auto { width: 100%; margin-top: 9px; border-color: #7d5cff; }
+button.auto.running { background: #5b3ee4; }
+.result { display: grid; gap: 7px; margin-top: 20px; padding: 16px; border: 1px solid #293652; border-radius: 12px; background: #10182d; }
+#status { color: #9eabc8; font-size: 12px; }
+#choice { font-size: 22px; }
+#confidence { color: #23d5ab; }
+.fineprint { overflow-wrap: anywhere; color: #7784a2; font-size: 11px; line-height: 1.4; }

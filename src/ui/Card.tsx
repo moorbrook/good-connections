@@ -64,8 +64,18 @@ function Shape({
   )
 }
 
-function StripePattern({ id, colour, theme }: { id: string; colour: string; theme: CardTheme }) {
-  const period = theme === 'classic' ? 24 : 21
+function StripePattern({
+  id,
+  colour,
+  theme,
+  periodScale = 1,
+}: {
+  id: string
+  colour: string
+  theme: CardTheme
+  periodScale?: number | undefined
+}) {
+  const period = (theme === 'classic' ? 24 : 21) * periodScale
   return (
     <pattern id={id} patternUnits="userSpaceOnUse" width={VB_W} height={period}>
       <line
@@ -192,11 +202,18 @@ interface SymbolProps {
   colour: string
   x: number
   patternId: string
+  variation?: CardVisualVariation | undefined
 }
 
-function Symbol({ theme, shape, fill, colour, x, patternId }: SymbolProps) {
+function Symbol({ theme, shape, fill, colour, x, patternId, variation }: SymbolProps) {
   const fillValue = fill === 0 ? colour : fill === 1 ? `url(#${patternId})` : 'none'
-  const strokeWidth = theme === 'classic' ? 7 : fill === 2 ? 8 : 7
+  const strokeWidth = (theme === 'classic' ? 7 : fill === 2 ? 8 : 7) * (variation?.strokeScale ?? 1)
+  const symbolScale = variation?.symbolScale ?? 1
+  const width = SYMBOL_W * symbolScale
+  const height = SYMBOL_H * symbolScale
+  const symbolX = x + (SYMBOL_W - width) / 2
+  const symbolY = (CARD_H - height) / 2 + (variation?.symbolY ?? 0)
+  const rotation = variation?.symbolRotation ?? 0
   const echo = theme === 'classic' ? null : (
     <Shape
       theme={theme}
@@ -212,11 +229,27 @@ function Symbol({ theme, shape, fill, colour, x, patternId }: SymbolProps) {
   )
 
   return (
-    <svg x={x} y={(CARD_H - SYMBOL_H) / 2} width={SYMBOL_W} height={SYMBOL_H} viewBox={`0 0 ${VB_W} ${VB_H}`} overflow="visible">
-      {echo}
-      <Shape theme={theme} shape={shape} fill={fillValue} stroke={colour} strokeWidth={strokeWidth} />
+    <svg x={symbolX} y={symbolY} width={width} height={height} viewBox={`0 0 ${VB_W} ${VB_H}`} overflow="visible">
+      <g transform={`rotate(${rotation} ${VB_W / 2} ${VB_H / 2})`}>
+        {echo}
+        <Shape theme={theme} shape={shape} fill={fillValue} stroke={colour} strokeWidth={strokeWidth} />
+      </g>
     </svg>
   )
+}
+
+/** Training-only visual degrees of freedom. Omit this in normal gameplay. */
+export interface CardVisualVariation {
+  readonly brightness: number
+  readonly contrast: number
+  readonly hueRotation: number
+  readonly saturation: number
+  readonly spacingScale: number
+  readonly stripePeriodScale: number
+  readonly strokeScale: number
+  readonly symbolRotation: number
+  readonly symbolScale: number
+  readonly symbolY: number
 }
 
 export interface CardProps {
@@ -225,9 +258,11 @@ export interface CardProps {
   theme?: CardTheme
   /** Accessible label override; defaults to a description of the four attributes. */
   label?: string
+  /** Seeded renderer variation used only by the hidden vision-training surface. */
+  visualVariation?: CardVisualVariation | undefined
 }
 
-export function Card({ card, theme: themeOverride, label }: CardProps) {
+export function Card({ card, theme: themeOverride, label, visualVariation }: CardProps) {
   const currentTheme = useCardTheme()
   const theme = themeOverride ?? currentTheme
   const uid = useId().replaceAll(':', '')
@@ -239,7 +274,7 @@ export function Card({ card, theme: themeOverride, label }: CardProps) {
   }
   const colour = CARD_THEME_BY_ID[theme].palette[card.colour]
   const count = card.count + 1
-  const gap = theme === 'classic' ? 16 : count === 3 ? 12 : 16
+  const gap = (theme === 'classic' ? 16 : count === 3 ? 12 : 16) * (visualVariation?.spacingScale ?? 1)
   const groupW = count * SYMBOL_W + (count - 1) * gap
   const startX = (CARD_W - groupW) / 2
   const xs = Array.from({ length: count }, (_, i) => startX + i * (SYMBOL_W + gap))
@@ -253,14 +288,33 @@ export function Card({ card, theme: themeOverride, label }: CardProps) {
       role="img"
       aria-label={describe}
       xmlns="http://www.w3.org/2000/svg"
+      style={visualVariation ? {
+        filter: `hue-rotate(${visualVariation.hueRotation}deg) saturate(${visualVariation.saturation}) contrast(${visualVariation.contrast}) brightness(${visualVariation.brightness})`,
+      } : undefined}
     >
       <defs>
-        {card.fill === 1 && <StripePattern id={patternId} colour={colour} theme={theme} />}
+        {card.fill === 1 && (
+          <StripePattern
+            id={patternId}
+            colour={colour}
+            theme={theme}
+            periodScale={visualVariation?.stripePeriodScale}
+          />
+        )}
         <ThemeDefinitions theme={theme} ids={ids} />
       </defs>
       <ThemeFrame theme={theme} colour={colour} ids={ids} />
       {xs.map((x, i) => (
-        <Symbol key={i} theme={theme} shape={card.shape} fill={card.fill} colour={colour} x={x} patternId={patternId} />
+        <Symbol
+          key={i}
+          theme={theme}
+          shape={card.shape}
+          fill={card.fill}
+          colour={colour}
+          x={x}
+          patternId={patternId}
+          variation={visualVariation}
+        />
       ))}
     </svg>
   )

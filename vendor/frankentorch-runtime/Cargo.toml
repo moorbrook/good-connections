@@ -1,0 +1,23 @@
+[package]
+name = "frankentorch-runtime"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license-file = "LICENSE"
+description = "Pinned FrankenTorch runtime with a wasm32 timestamp compatibility patch"
+
+[lib]
+name = "ft_runtime"
+
+[features]
+default = []
+asupersync-integration = ["dep:asupersync"]
+frankentui-integration = ["dep:ftui"]
+
+[dependencies]
+ft-core = { package = "frankentorch-core", git = "https://github.com/Dicklesworthstone/frankentorch", rev = "dd6daf414e84462d2e0f35d8c103e1321e758b44" }
+asupersync = { version = "0.3.10", default-features = false, optional = true }
+ftui = { version = "0.2.0", default-features = false, optional = true }
+
+[lints.rust]
+unsafe_code = "deny"

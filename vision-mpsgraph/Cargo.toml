@@ -1,0 +1,28 @@
+[package]
+name = "set-vision-mpsgraph"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ft-core = { package = "frankentorch-core", git = "https://github.com/Dicklesworthstone/frankentorch", rev = "dd6daf414e84462d2e0f35d8c103e1321e758b44" }
+ft-serialize = { git = "https://github.com/Dicklesworthstone/frankentorch", rev = "dd6daf414e84462d2e0f35d8c103e1321e758b44" }
+objc2 = "0.6.3"
+objc2-foundation = "0.3.2"
+objc2-metal = "0.3.2"
+objc2-metal-performance-shaders = "0.3.2"
+objc2-metal-performance-shaders-graph = "0.3.2"
+set-vision-contract = { path = "../vision-contract" }
+set-vision-data = { path = "../vision-data" }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+case_sensitive_file_extension_comparisons = "allow"
+too_many_lines = "allow"
+type_complexity = "allow"

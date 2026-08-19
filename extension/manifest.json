@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Good Connections Vision Player",
+  "version": "0.1.0",
+  "description": "Pixel-only local vision player for Set-style boards.",
+  "permissions": ["activeTab", "sidePanel", "scripting"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Open vision player" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}

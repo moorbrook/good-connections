@@ -8,9 +8,12 @@ deno.lock
 dist/
 dist-ssr/
 build/
+target/
 
 # Test output
 coverage/
+vision-artifacts/
+tmp/
 
 # Environment
 .env

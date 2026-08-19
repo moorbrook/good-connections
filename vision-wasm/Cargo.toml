@@ -1,0 +1,43 @@
+[package]
+name = "set-vision-wasm"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# ft-serialize brings asupersync transitively; this direct entry selects its
+# browser-safe runtime feature for the unified dependency graph.
+asupersync = { version = "0.3.10", default-features = false, features = ["wasm-browser-minimal"] }
+ft-api = { package = "frankentorch-api", git = "https://github.com/Dicklesworthstone/frankentorch", rev = "dd6daf414e84462d2e0f35d8c103e1321e758b44" }
+ft-autograd = { package = "frankentorch-autograd", git = "https://github.com/Dicklesworthstone/frankentorch", rev = "dd6daf414e84462d2e0f35d8c103e1321e758b44" }
+ft-core = { package = "frankentorch-core", git = "https://github.com/Dicklesworthstone/frankentorch", rev = "dd6daf414e84462d2e0f35d8c103e1321e758b44" }
+ft-nn = { git = "https://github.com/Dicklesworthstone/frankentorch", rev = "dd6daf414e84462d2e0f35d8c103e1321e758b44" }
+ft-serialize = { git = "https://github.com/Dicklesworthstone/frankentorch", rev = "dd6daf414e84462d2e0f35d8c103e1321e758b44" }
+set-vision-policy = { path = "../vision-policy" }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unimplemented = "deny"
+todo = "deny"
+dbg_macro = "deny"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
+
+[lints.rust]
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "deny"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+
+[patch."https://github.com/Dicklesworthstone/frankentorch"]
+ft-runtime = { package = "frankentorch-runtime", path = "../vendor/frankentorch-runtime" }

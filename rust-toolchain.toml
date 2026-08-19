@@ -1,0 +1,5 @@
+[toolchain]
+# One reproducible toolchain for the trainer, shared policy, and browser build.
+channel = "nightly-2026-08-18"
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

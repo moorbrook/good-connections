@@ -41,6 +41,11 @@ body {
   min-height: 100%;
 }
 
+/* Fixed production-renderer atlas used by the pixel-only vision trainer. */
+.vision-atlas-page #root {
+  max-width: none;
+}
+
 .muted {
   color: var(--muted);
   margin: 0;
