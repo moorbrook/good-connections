@@ -13,15 +13,19 @@ cargo run --release --manifest-path vision/Cargo.toml -- \
   --validation-atlas-dir "$RESEARCH_SHARD_DIR" \
   --output-dir vision-artifacts/candidate-a \
   --ensemble-output-dir vision-artifacts/candidate-b \
+  --ensemble-primary-weight "$PRIMARY_WEIGHT" \
   --eval-batches "$SHARD_BATCHES" --eval-boards "$SHARD_BOARDS" \
   --triple-seed 177145488695021 --board-seed 194222009835245
 ```
 
 Use one board-v7 research shard per process, with the allocation in
 `BOARD_V7_PROTOCOL.md`; do not load all 516 atlases into one process. The
-existing shard helper currently evaluates a single checkpoint, so an ensemble
-measurement must invoke the evaluator directly for each shard and aggregate
-the three logs with the same fixed allocation.
+primary weight must be finite and strictly between zero and one; it defaults to
+`0.5` when an ensemble is requested and is accepted only with both
+`--ensemble-output-dir` and `--eval-only`. For a non-default weight, the
+evaluator computes `W * primary + (1 - W) * secondary` for every set logit,
+board score, and attribute logit. The `0.5` path retains the existing midpoint
+operation exactly.
 
 Each checkpoint is loaded into its own strict FrankenTorch session. For the
 triple metrics, the evaluator averages corresponding set logits and attribute

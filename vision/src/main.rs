@@ -45,10 +45,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ensemble_model.load_state_dict(&mut ensemble_session, &state, true)?;
         let graph_boundary = ensemble_session.autograd_graph_node_count();
         println!("ensemble_checkpoint: {}", checkpoint.display());
+        println!(
+            "ensemble_primary_weight: {:.17}",
+            config.ensemble_primary_weight
+        );
         Some(EnsemblePolicy {
             session: ensemble_session,
             model: ensemble_model,
             graph_boundary,
+            primary_weight: config.ensemble_primary_weight,
         })
     } else {
         None
@@ -188,6 +193,7 @@ struct EnsemblePolicy {
     session: FrankenTorchSession,
     model: VisualSetPolicy,
     graph_boundary: usize,
+    primary_weight: f64,
 }
 
 #[derive(Debug)]
@@ -270,10 +276,12 @@ fn evaluate(
             let set_values = average_logits(
                 &session.tensor_values(set_logits)?,
                 &ensemble.session.tensor_values(ensemble_set_logits)?,
+                ensemble.primary_weight,
             )?;
             let attribute_values = average_logits(
                 &session.tensor_values(attribute_logits)?,
                 &ensemble.session.tensor_values(ensemble_attribute_logits)?,
+                ensemble.primary_weight,
             )?;
             (set_values, attribute_values)
         } else {
@@ -323,7 +331,7 @@ fn evaluate(
                 ensemble
                     .model
                     .score_board(&mut ensemble.session, board.pixels, BOARD_CARDS)?;
-            average_board_scores(&primary, &secondary)?
+            average_board_scores(&primary, &secondary, ensemble.primary_weight)?
         } else {
             model.score_board(session, board.pixels, BOARD_CARDS)?
         };
@@ -430,7 +438,12 @@ fn evaluate(
     })
 }
 
-fn average_logits(first: &[f64], second: &[f64]) -> Result<Vec<f64>, std::io::Error> {
+fn average_logits(
+    first: &[f64],
+    second: &[f64],
+    primary_weight: f64,
+) -> Result<Vec<f64>, std::io::Error> {
+    validate_primary_weight(primary_weight)?;
     if first.len() != second.len() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -449,7 +462,11 @@ fn average_logits(first: &[f64], second: &[f64]) -> Result<Vec<f64>, std::io::Er
                 "ensemble logits must be finite",
             ));
         }
-        let value = left.midpoint(right);
+        let value = if primary_weight.to_bits() == 0.5_f64.to_bits() {
+            left.midpoint(right)
+        } else {
+            primary_weight * left + (1.0 - primary_weight) * right
+        };
         if !value.is_finite() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -464,6 +481,7 @@ fn average_logits(first: &[f64], second: &[f64]) -> Result<Vec<f64>, std::io::Er
 fn average_board_scores(
     first: &BoardScores,
     second: &BoardScores,
+    primary_weight: f64,
 ) -> Result<BoardScores, std::io::Error> {
     if first.triples != second.triples {
         return Err(std::io::Error::new(
@@ -473,9 +491,23 @@ fn average_board_scores(
     }
     Ok(BoardScores {
         triples: first.triples.clone(),
-        scores: average_logits(&first.scores, &second.scores)?,
-        attribute_logits: average_logits(&first.attribute_logits, &second.attribute_logits)?,
+        scores: average_logits(&first.scores, &second.scores, primary_weight)?,
+        attribute_logits: average_logits(
+            &first.attribute_logits,
+            &second.attribute_logits,
+            primary_weight,
+        )?,
     })
+}
+
+fn validate_primary_weight(primary_weight: f64) -> Result<(), std::io::Error> {
+    if !(primary_weight.is_finite() && 0.0 < primary_weight && primary_weight < 1.0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "ensemble primary weight must be finite and strictly between 0 and 1",
+        ));
+    }
+    Ok(())
 }
 
 fn write_abstention_samples(
@@ -534,8 +566,14 @@ mod tests {
 
     #[test]
     fn averages_logits_componentwise_without_rounding_shortcuts() {
-        let averaged = average_logits(&[1.0, 3.0, -5.0], &[5.0, 7.0, 9.0]).ok();
+        let averaged = average_logits(&[1.0, 3.0, -5.0], &[5.0, 7.0, 9.0], 0.5).ok();
         assert_eq!(averaged, Some(vec![3.0, 5.0, 2.0]));
+    }
+
+    #[test]
+    fn non_default_primary_weight_uses_primary_and_secondary_coefficients() {
+        let averaged = average_logits(&[1.0, 3.0, -5.0], &[5.0, 7.0, 9.0], 0.25).ok();
+        assert_eq!(averaged, Some(vec![4.0, 6.0, 5.5]));
     }
 
     #[test]
@@ -550,7 +588,7 @@ mod tests {
             scores: vec![5.0, 7.0],
             attribute_logits: vec![5.0, 7.0, 9.0],
         };
-        let averaged = average_board_scores(&first, &second).ok();
+        let averaged = average_board_scores(&first, &second, 0.5).ok();
         assert_eq!(
             averaged.as_ref().map(|scores| scores.scores.clone()),
             Some(vec![3.0, 5.0])
@@ -573,14 +611,14 @@ mod tests {
             scores: vec![3.0, 4.0],
             attribute_logits: vec![4.0, 5.0, 6.0],
         };
-        assert!(average_board_scores(&first, &second).is_err());
+        assert!(average_board_scores(&first, &second, 0.5).is_err());
 
         let second = BoardScores {
             triples: first.triples.clone(),
             scores: vec![3.0],
             attribute_logits: first.attribute_logits.clone(),
         };
-        assert!(average_board_scores(&first, &second).is_err());
+        assert!(average_board_scores(&first, &second, 0.5).is_err());
     }
 
     #[test]
@@ -595,6 +633,13 @@ mod tests {
             scores: vec![1.0],
             attribute_logits: first.attribute_logits.clone(),
         };
-        assert!(average_board_scores(&first, &second).is_err());
+        assert!(average_board_scores(&first, &second, 0.5).is_err());
+    }
+
+    #[test]
+    fn averaging_rejects_invalid_primary_weight() {
+        assert!(average_logits(&[1.0], &[2.0], 0.0).is_err());
+        assert!(average_logits(&[1.0], &[2.0], 1.0).is_err());
+        assert!(average_logits(&[1.0], &[2.0], f64::NAN).is_err());
     }
 }
