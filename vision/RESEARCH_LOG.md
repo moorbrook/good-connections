@@ -453,3 +453,11 @@ failures, then raw triple accuracy, then parameter count. Only a candidate at or
 accuracy (at most 81 failures in 8,192 boards) may receive the one sealed 10,000-board evaluation.
 Do not fit or apply abstention during this cycle. Full protocol details are in
 `BOARD_V7_PROTOCOL.md`.
+
+The board-v7 training-only corpus is now locked separately at
+`vision-artifacts/board-v7-training-atlases`: seeds 17001–17002, all four themes,
+DPR-1 widths 97/211/349 with all eleven profiles, and DPR-2 widths 121/251 with
+clean/crop/shadow/tilt/occlusion. It contains 344 atlases (172 per seed), has
+digest `4a16ab365a91f041b2b14afb51c90a7e2268150bd29a4ff90c3667b7377cb5f8`, and
+was verified and visually inspected without running an evaluator. It is
+training input only; no research or sealed prediction was generated from it.
