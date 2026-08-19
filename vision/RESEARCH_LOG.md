@@ -425,3 +425,26 @@ Restore the shipped single-kernel source so it continues to match the browser ch
 the research artifacts and tracked `BOARD_V6_RESULTS.tsv`. The dual-kernel result is evidence for
 multi-scale features, but one seed and a 0.56-point absolute raw gain are not enough to adopt a
 slower policy or claim a general architectural law.
+
+## 2026-08-19 — Board-v7 adversarial raw-perception corpus locked
+
+Board-v7 is a fresh capture-shift protocol targeting at least 99% raw board accuracy at 100% coverage,
+not guarded accuracy. The v6 audit identified five untested capture blind spots: severe defocus,
+card-content tilt, partial occlusion, compressed colour gamut, and compound blur/crop/shadow/contrast
+loss. The hidden atlas route now supports literal `defocus`, `tilt`, `occlusion`, `gamut`, and `compound`
+profiles, plus source widths down to 72px so the locked 83px raster can probe sub-96px behavior. The
+occlusion band is translucent and leaves symbol and stripe evidence above and below it; it is intended
+to remain human-solvable rather than erase the card identity.
+
+The research corpus is `board-v7-research-atlases`: seeds 15001–15003, all four themes, DPR 1 widths
+83/157/293 with all 11 profiles, and DPR 2 widths 107/277 with clean/crop/shadow/tilt/occlusion. It
+contains 516 atlases with sorted per-file aggregate SHA-256
+`fea260de85f3f5221675162812cd3ed4201fd084d40bb47dcb89c4467d421edc`. The sealed corpus is the same
+matrix with seeds 16001–16003 and digest
+`46c56adb4aa2e8aeb4e4ab55f59b02670a056c8c9232402de5b0d802bc8e7dc6`. Both corpora passed the locked
+filename, count, dimension, and visual checks; the sealed corpus was not passed to an evaluator.
+
+The raw selection run is fixed at 1,024 triple batches and 8,192 boards. Rank by raw board failures,
+then raw triple accuracy, then parameter count. Only a candidate at or above 99% research accuracy
+(at most 81 failures in 8,192 boards) may receive the one sealed 10,000-board evaluation. Do not fit
+or apply abstention during this cycle. Full protocol details are in `BOARD_V7_PROTOCOL.md`.

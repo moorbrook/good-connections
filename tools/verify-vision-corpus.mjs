@@ -11,7 +11,7 @@ if (!directoryArgument || !Number.isSafeInteger(expectedCount) || expectedCount 
 const directory = resolve(directoryArgument)
 const files = (await readdir(directory)).filter((file) => file.endsWith('.png')).sort()
 if (files.length !== expectedCount) throw new Error(`Expected ${expectedCount} PNGs, found ${files.length}`)
-const pattern = /^(classic|nocturne|atelier|signal)-(\d+)(?:-p(clean|blur|crop|shadow|lowcontrast|jpeg))?(?:-dpr([12]))?(?:-w(\d+))?\.png$/
+const pattern = /^(classic|nocturne|atelier|signal)-(\d+)(?:-p(clean|blur|crop|shadow|lowcontrast|jpeg|defocus|tilt|occlusion|gamut|compound))?(?:-dpr([12]))?(?:-w(\d+))?\.png$/
 const counts = { themes: {}, profiles: {}, dprs: {}, widths: {}, seeds: {} }
 const increment = (group, value) => { group[value] = (group[value] ?? 0) + 1 }
 
