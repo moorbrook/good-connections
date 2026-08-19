@@ -28,6 +28,7 @@ const WEIGHT_DECAY: f32 = 1.0e-4;
 struct TrainConfig {
     steps: usize,
     output: Option<PathBuf>,
+    atlas_dir: Option<PathBuf>,
     augment: bool,
     data_seed: u64,
     init_seed: u64,
@@ -275,6 +276,7 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
     let mut config = TrainConfig {
         steps: DEFAULT_STEPS,
         output: None,
+        atlas_dir: None,
         augment: true,
         data_seed: DEFAULT_DATA_SEED,
         init_seed: DEFAULT_INIT_SEED,
@@ -293,6 +295,11 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
                     arguments.next().ok_or("--output requires a path")?,
                 ));
             }
+            "--atlas-dir" => {
+                config.atlas_dir = Some(PathBuf::from(
+                    arguments.next().ok_or("--atlas-dir requires a path")?,
+                ));
+            }
             "--no-augment" => config.augment = false,
             "--data-seed" => {
                 config.data_seed = arguments
@@ -308,7 +315,7 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
             }
             unknown => {
                 return Err(format!(
-                    "unknown argument {unknown}; usage: [--steps N] [--output PATH] [--no-augment] [--data-seed N] [--init-seed N]"
+                    "unknown argument {unknown}; usage: [--steps N] [--output PATH] [--atlas-dir PATH] [--no-augment] [--data-seed N] [--init-seed N]"
                 )
                 .into());
             }
@@ -452,7 +459,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .ok_or("MPSGraph crate has no repository parent")?;
-    let atlases = AtlasCollection::load(&repository.join("vision-artifacts/atlases"))?;
+    let atlas_dir = config
+        .atlas_dir
+        .unwrap_or_else(|| repository.join("vision-artifacts/atlases"));
+    let atlases = AtlasCollection::load(&atlas_dir)?;
     let mut rng = Rng::new(config.data_seed);
     let probe = prepare_batch(&atlases.make_batch(&mut rng, policy_graph::BATCH_SIZE, false));
     let compile_started = Instant::now();
