@@ -41,6 +41,16 @@ struct Builder {
     random_state: u64,
 }
 
+#[derive(Clone, Copy)]
+struct ConvolutionSpec {
+    input_channels: usize,
+    output_channels: usize,
+    kernel: usize,
+    stride: usize,
+    padding: usize,
+    dilation: usize,
+}
+
 impl Builder {
     fn new(random_state: u64) -> Self {
         Self {
@@ -152,19 +162,29 @@ impl Builder {
         &mut self,
         prefix: &str,
         input: &MPSGraphTensor,
-        input_channels: usize,
-        output_channels: usize,
-        kernel: usize,
-        padding: usize,
+        spec: ConvolutionSpec,
     ) -> Retained<MPSGraphTensor> {
         let weight = self.parameter(
             format!("{prefix}.weight"),
-            &[output_channels, input_channels, kernel, kernel],
+            &[
+                spec.output_channels,
+                spec.input_channels,
+                spec.kernel,
+                spec.kernel,
+            ],
         );
-        let bias = self.zeros(format!("{prefix}.bias"), &[1, output_channels, 1, 1]);
+        let bias = self.zeros(format!("{prefix}.bias"), &[1, spec.output_channels, 1, 1]);
         let descriptor = unsafe {
             MPSGraphConvolution2DOpDescriptor::descriptorWithStrideInX_strideInY_dilationRateInX_dilationRateInY_groups_paddingLeft_paddingRight_paddingTop_paddingBottom_paddingStyle_dataLayout_weightsLayout(
-                2, 2, 1, 1, 1, padding, padding, padding, padding,
+                spec.stride,
+                spec.stride,
+                spec.dilation,
+                spec.dilation,
+                1,
+                spec.padding,
+                spec.padding,
+                spec.padding,
+                spec.padding,
                 MPSGraphPaddingStyle::Explicit,
                 MPSGraphTensorNamedDataLayout::NCHW,
                 MPSGraphTensorNamedDataLayout::OIHW,
@@ -209,23 +229,44 @@ impl PolicyGraph {
         let shared = builder.convolution(
             "shared_convolution",
             &pixels,
-            CHANNELS,
-            SHARED_CHANNELS,
-            5,
-            2,
+            ConvolutionSpec {
+                input_channels: CHANNELS,
+                output_channels: SHARED_CHANNELS,
+                kernel: 5,
+                stride: 2,
+                padding: 2,
+                dilation: 1,
+            },
         );
         let shared = builder.activation(&shared);
         let mut heads = Vec::with_capacity(ATTRIBUTE_COUNT);
         for index in 0..ATTRIBUTE_COUNT {
             let prefix = format!("attribute_head_{index}");
             let encoded = builder.convolution(
-                &format!("{prefix}.convolution"),
+                &format!("{prefix}.local_convolution"),
                 &shared,
-                SHARED_CHANNELS,
-                HEAD_CHANNELS,
-                3,
-                1,
+                ConvolutionSpec {
+                    input_channels: SHARED_CHANNELS,
+                    output_channels: HEAD_CHANNELS,
+                    kernel: 3,
+                    stride: 2,
+                    padding: 1,
+                    dilation: 1,
+                },
             );
+            let residual = builder.convolution(
+                &format!("{prefix}.dilated_residual_convolution"),
+                &encoded,
+                ConvolutionSpec {
+                    input_channels: HEAD_CHANNELS,
+                    output_channels: HEAD_CHANNELS,
+                    kernel: 3,
+                    stride: 1,
+                    padding: 2,
+                    dilation: 2,
+                },
+            );
+            let encoded = builder.add(&encoded, &residual);
             let encoded = builder.activation(&encoded);
             let encoded = builder.reshape(&encoded, &[CARD_COUNT, HEAD_FEATURES]);
             let encoded = builder.linear(
