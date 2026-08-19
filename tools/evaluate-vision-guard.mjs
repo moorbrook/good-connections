@@ -10,6 +10,9 @@ if (!samplesPath) {
 const rows = (await readFile(samplesPath, 'utf8')).trim().split('\n')
 const header = rows.shift()?.split('\t') ?? []
 const column = Object.fromEntries(header.map((name, index) => [name, index]))
+for (const name of ['correct', 'action', 'score', 'score_margin', 'mean_attribute_entropy', 'min_attribute_margin']) {
+  if (!(name in column)) throw new Error(`Missing ${name} column in ${samplesPath}`)
+}
 const groups = new Map()
 const overall = { boards: 0, errors: 0, accepted: 0, acceptedErrors: 0 }
 
@@ -18,14 +21,15 @@ for (const row of rows) {
   const atlas = values[column.atlas]
   const profile = atlas.match(/-p(blur|crop|shadow|lowcontrast|jpeg|defocus|tilt|occlusion|gamut|compound)/)?.[1] ?? 'clean'
   const correct = values[column.correct] === '1'
-  const strongestIsSet = values[column.strongest_is_set] === '1'
+  // `strongest_is_set` is ground truth and must never decide runtime coverage.
+  const predictedSet = values[column.action] !== 'NoSet'
   const observation = {
     score: Number(values[column.score]),
     scoreMargin: Number(values[column.score_margin]),
     attributeEntropy: Number(values[column.mean_attribute_entropy]),
     attributeMargin: Number(values[column.min_attribute_margin]),
   }
-  const accepted = strongestIsSet && diagnosticsPass(observation)
+  const accepted = predictedSet && diagnosticsPass(observation)
   const group = groups.get(profile) ?? { boards: 0, errors: 0, accepted: 0, acceptedErrors: 0 }
   for (const stats of [overall, group]) {
     stats.boards++

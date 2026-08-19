@@ -155,13 +155,16 @@ node tools/calibrate-vision-guard.mjs \
 ```
 
 The embedded checkpoint is the selected single fill-texture replica, not the four-checkpoint NumPy
-contextual/hypergraph ensemble. On 8,192 disjoint 190xx boards it scored 97.4976% raw action
-accuracy. A linear diagnostic guard fitted only on predicted-SET actions from 180xx development data
-at a predeclared 99.9% accepted-accuracy operating point accepted 49.0234% of all disjoint mixed
-boards with 99.9004% accepted accuracy. Predicted `NoSet` actions never click. These guarded numbers
-are deployment diagnostics, not the board-v9 100%-coverage research claim. In the rebuilt extension,
-all 12 responsive browser proposals were valid and all 12 passed the guard, completed their clicks,
-and verified a pixel-level board transition. A 1,000-iteration Node/WASM benchmark measured 5.62 ms
+contextual/hypergraph ensemble. On 8,192 disjoint 190xx boards it made 7,987 correct raw decisions:
+**97.4976% at 100% coverage**. The split was 4,012/4,096 (97.9492%) on boards with a SET and
+3,975/4,096 (97.0459%) on `NoSet` boards.
+
+The browser guard is reported separately as counts rather than used to inflate the model headline.
+On the same stream it allowed 2,371 clicks: 2,363 correct and 8 wrong. On boards with a SET it
+clicked 2,369/4,096 (57.8369% click coverage), with 6 wrong clicks (99.7467% click accuracy). It also
+allowed 2 wrong clicks on `NoSet` boards, so it is not a fail-safe. In the rebuilt extension, all 12
+responsive browser proposals were valid; 7 passed the guard, completed their clicks, and verified a
+pixel-level board transition. A 1,000-iteration Node/WASM benchmark measured 5.62 ms
 cached inference and 5.73 ms including pixel transfer per 12-card board on the current host.
 
 ## Load and use the extension

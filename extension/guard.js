@@ -5,14 +5,14 @@ export const DEFAULT_GUARD_THRESHOLDS = Object.freeze({
   // accuracy. Predicted NoSet actions never click. The 190xx boards remain
   // evaluation-only.
   // Feature order: score, score margin, negative entropy, attribute margin.
-  diagnosticBias: -5.551878395219247,
+  diagnosticBias: -3.672196177932766,
   diagnosticWeights: Object.freeze([
-    4.51161226741579,
-    -0.040164804688582446,
-    -4.977270412000292,
-    6.660767336957847,
+    1.0474526063898177,
+    -0.22582742572191897,
+    48.54686529887519,
+    6.300088463943087,
   ]),
-  minDiagnosticLogit: -3.495338020774612,
+  minDiagnosticLogit: 2.3476605241586093,
   maxRepeatPixelDelta: 0.008,
   minBoardPixelDelta: 0.025,
 })

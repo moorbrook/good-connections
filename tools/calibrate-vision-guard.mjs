@@ -13,12 +13,14 @@ if (!(minAcceptedAccuracy > 0 && minAcceptedAccuracy <= 1)) {
 const rows = (await readFile(samplesPath, 'utf8')).trim().split('\n')
 const header = rows.shift()?.split('\t') ?? []
 const column = Object.fromEntries(header.map((name, index) => [name, index]))
-const required = ['correct', 'strongest_is_set', 'score', 'score_margin', 'mean_attribute_entropy', 'min_attribute_margin']
+const required = ['correct', 'action', 'score', 'score_margin', 'mean_attribute_entropy', 'min_attribute_margin']
 for (const name of required) {
   if (!(name in column)) throw new Error(`Missing ${name} column in ${samplesPath}`)
 }
 
-const actionRows = rows.filter((row) => row.split('\t')[column.strongest_is_set] === '1')
+// `strongest_is_set` is an oracle correctness field. Runtime eligibility must
+// come only from the model's predicted action.
+const actionRows = rows.filter((row) => row.split('\t')[column.action] !== 'NoSet')
 const samples = actionRows.map((row) => {
   const values = row.split('\t')
   return {
@@ -110,7 +112,7 @@ console.log(JSON.stringify({
   weights: rawWeights,
   minAcceptedAccuracy,
   thresholdLogit,
-  excludedNoSetActions: rows.length - actionRows.length,
+  excludedPredictedNoSetActions: rows.length - actionRows.length,
   samples: samples.length,
   correct: positives,
   incorrect: negatives,
