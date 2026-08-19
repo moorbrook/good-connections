@@ -145,7 +145,8 @@ impl From<AutogradError> for PolicyError {
 }
 
 struct AttributeHead {
-    convolution: Conv2d,
+    local_convolution: Conv2d,
+    dilated_residual_convolution: Conv2d,
     projection: Linear,
     classifier: Linear,
 }
@@ -153,7 +154,7 @@ struct AttributeHead {
 impl AttributeHead {
     fn new(session: &mut FrankenTorchSession) -> Result<Self, AutogradError> {
         Ok(Self {
-            convolution: Conv2d::new(
+            local_convolution: Conv2d::new(
                 session,
                 CONV_CHANNELS,
                 SPECIALIST_CHANNELS,
@@ -162,6 +163,16 @@ impl AttributeHead {
                 (1, 1),
                 true,
             )?,
+            dilated_residual_convolution: Conv2d::new(
+                session,
+                SPECIALIST_CHANNELS,
+                SPECIALIST_CHANNELS,
+                (3, 3),
+                (1, 1),
+                (2, 2),
+                true,
+            )?
+            .dilation((2, 2)),
             projection: Linear::new(session, SPECIALIST_FEATURES, SPECIALIST_EMBED_DIM, true)?,
             classifier: Linear::new(session, SPECIALIST_EMBED_DIM, ATTRIBUTE_VALUE_COUNT, true)?,
         })
@@ -175,7 +186,9 @@ impl Module for AttributeHead {
         input: TensorNodeId,
     ) -> Result<TensorNodeId, AutogradError> {
         let card_count = session.tensor_shape(input)?[0];
-        let encoded = self.convolution.forward(session, input)?;
+        let local = self.local_convolution.forward(session, input)?;
+        let residual = self.dilated_residual_convolution.forward(session, local)?;
+        let encoded = session.tensor_add(local, residual)?;
         let encoded = session.tensor_gelu(encoded)?;
         let encoded = session.tensor_reshape(encoded, vec![card_count, SPECIALIST_FEATURES])?;
         let encoded = self.projection.forward(session, encoded)?;
@@ -192,7 +205,11 @@ impl Module for AttributeHead {
 
     fn named_children(&self) -> Vec<(String, &dyn Module)> {
         vec![
-            ("convolution".to_string(), &self.convolution),
+            ("local_convolution".to_string(), &self.local_convolution),
+            (
+                "dilated_residual_convolution".to_string(),
+                &self.dilated_residual_convolution,
+            ),
             ("projection".to_string(), &self.projection),
             ("classifier".to_string(), &self.classifier),
         ]
@@ -202,8 +219,9 @@ impl Module for AttributeHead {
 /// The one learned policy definition shared by training and browser inference.
 ///
 /// It has a shared low-level convolution, four attribute-specialist branches,
-/// and a learned permutation-invariant relation scorer. It is not a
-/// transformer, VLM, or VLA.
+/// and a learned permutation-invariant relation scorer. Each specialist keeps
+/// its local stride-two features while adding a rate-two dilated residual path.
+/// It is not a transformer, VLM, or VLA.
 pub struct VisualSetPolicy {
     shared_convolution: Conv2d,
     attribute_heads: [AttributeHead; ATTRIBUTE_COUNT],
