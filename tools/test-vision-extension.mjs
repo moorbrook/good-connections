@@ -314,7 +314,7 @@ try {
     await panel.evaluate("document.querySelector('#status').textContent = 'test pending'; document.querySelector('#scan').click()")
     const status = await waitFor(async () => {
       const value = await panel.evaluate("document.querySelector('#status').textContent")
-      if (value.startsWith('Scored') || value.startsWith('Abstained:')) return value
+      if (value.startsWith('Scored') || value.startsWith('Abstained:') || value.startsWith('No SET predicted;')) return value
       if (
         value !== 'test pending'
         && !value.startsWith('Capturing ')

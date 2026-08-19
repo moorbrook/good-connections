@@ -231,7 +231,6 @@ impl PolicyGraph {
         typed_relations: bool,
         negative_logsumexp_loss_weight: f32,
         wide_vision: bool,
-        fill_texture_branch: bool,
         fill_loss_multiplier: f32,
     ) -> Self {
         let mut builder = Builder::new(init_seed);
@@ -315,7 +314,7 @@ impl PolicyGraph {
                 ATTRIBUTE_VALUE_COUNT,
             ));
         }
-        if fill_texture_branch {
+        if typed_relations && !wide_vision {
             let texture = builder.convolution(
                 "fill_texture_head.fine_convolution",
                 &pixels,

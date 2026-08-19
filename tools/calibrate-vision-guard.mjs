@@ -1,20 +1,25 @@
 import { readFile } from 'node:fs/promises'
 
-const [samplesPath] = process.argv.slice(2)
+const [samplesPath, minAcceptedAccuracyText = '1'] = process.argv.slice(2)
 if (!samplesPath) {
-  console.error('Usage: node tools/calibrate-vision-guard.mjs ABSTENTION_SAMPLES.tsv')
+  console.error('Usage: node tools/calibrate-vision-guard.mjs ABSTENTION_SAMPLES.tsv [MIN_ACCEPTED_ACCURACY]')
   process.exit(2)
+}
+const minAcceptedAccuracy = Number(minAcceptedAccuracyText)
+if (!(minAcceptedAccuracy > 0 && minAcceptedAccuracy <= 1)) {
+  throw new Error('MIN_ACCEPTED_ACCURACY must be greater than zero and at most one')
 }
 
 const rows = (await readFile(samplesPath, 'utf8')).trim().split('\n')
 const header = rows.shift()?.split('\t') ?? []
 const column = Object.fromEntries(header.map((name, index) => [name, index]))
-const required = ['correct', 'score', 'score_margin', 'mean_attribute_entropy', 'min_attribute_margin']
+const required = ['correct', 'strongest_is_set', 'score', 'score_margin', 'mean_attribute_entropy', 'min_attribute_margin']
 for (const name of required) {
   if (!(name in column)) throw new Error(`Missing ${name} column in ${samplesPath}`)
 }
 
-const samples = rows.map((row) => {
+const actionRows = rows.filter((row) => row.split('\t')[column.strongest_is_set] === '1')
+const samples = actionRows.map((row) => {
   const values = row.split('\t')
   return {
     label: Number(values[column.correct]),
@@ -74,8 +79,27 @@ for (let step = 0; step < 6_000; step++) {
 const rawWeights = weights.map((weight, feature) => weight / deviations[feature])
 const rawBias = bias - rawWeights.reduce((total, weight, feature) => total + weight * means[feature], 0)
 const logits = samples.map((sample) => rawBias + sample.features.reduce((total, value, feature) => total + value * rawWeights[feature], 0))
-const maxIncorrectLogit = Math.max(...logits.filter((_, index) => samples[index].label === 0))
-const thresholdLogit = maxIncorrectLogit + 1e-9
+const ranked = logits
+  .map((logit, index) => ({ logit, label: samples[index].label }))
+  .sort((left, right) => right.logit - left.logit)
+let thresholdLogit = Number.POSITIVE_INFINITY
+let rankedAccepted = 0
+let rankedCorrect = 0
+for (let start = 0; start < ranked.length;) {
+  let end = start
+  while (end < ranked.length && ranked[end].logit === ranked[start].logit) {
+    rankedCorrect += ranked[end].label
+    end++
+  }
+  rankedAccepted = end
+  if (rankedCorrect / rankedAccepted >= minAcceptedAccuracy) {
+    thresholdLogit = ranked[start].logit
+  }
+  start = end
+}
+if (!Number.isFinite(thresholdLogit)) {
+  throw new Error(`No operating point reaches ${minAcceptedAccuracy} accepted accuracy`)
+}
 const accepted = logits.map((logit) => logit >= thresholdLogit)
 const acceptedCorrect = accepted.filter((value, index) => value && samples[index].label === 1).length
 const acceptedIncorrect = accepted.filter((value, index) => value && samples[index].label === 0).length
@@ -84,7 +108,9 @@ console.log(JSON.stringify({
   featureOrder: ['score', 'scoreMargin', 'negativeAttributeEntropy', 'attributeMargin'],
   bias: rawBias,
   weights: rawWeights,
+  minAcceptedAccuracy,
   thresholdLogit,
+  excludedNoSetActions: rows.length - actionRows.length,
   samples: samples.length,
   correct: positives,
   incorrect: negatives,

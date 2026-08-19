@@ -1,14 +1,18 @@
 export const DEFAULT_GUARD_THRESHOLDS = Object.freeze({
-  // Linear diagnostic guard fitted once on board-v5 research replicate 5.
+  // Linear diagnostic guard fitted on predicted-SET actions from the deployed
+  // fill-texture checkpoint's disjoint 180xx development boards. The threshold
+  // is the widest operating point retaining at least 99.9% accepted development
+  // accuracy. Predicted NoSet actions never click. The 190xx boards remain
+  // evaluation-only.
   // Feature order: score, score margin, negative entropy, attribute margin.
-  diagnosticBias: 5.0201131133169445,
+  diagnosticBias: -5.551878395219247,
   diagnosticWeights: Object.freeze([
-    0.3367313801535807,
-    -0.0243837612418493,
-    121.55320790903255,
-    -5.862390950523434,
+    4.51161226741579,
+    -0.040164804688582446,
+    -4.977270412000292,
+    6.660767336957847,
   ]),
-  minDiagnosticLogit: 1.5354155735768167,
+  minDiagnosticLogit: -3.495338020774612,
   maxRepeatPixelDelta: 0.008,
   minBoardPixelDelta: 0.025,
 })

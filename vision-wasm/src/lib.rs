@@ -9,7 +9,9 @@ use std::cell::RefCell;
 use ft_api::FrankenTorchSession;
 use ft_core::ExecutionMode;
 use ft_nn::Module;
-use set_vision_policy::{CARD_HEIGHT, CARD_PIXELS, CARD_WIDTH, CHANNELS, DeployedVisualSetPolicy};
+use set_vision_policy::{
+    CARD_HEIGHT, CARD_PIXELS, CARD_WIDTH, CHANNELS, DeployedVisualSetPolicy, RawBoardAction,
+};
 
 const MIN_CARDS: usize = 3;
 const MAX_CARDS: usize = 32;
@@ -25,6 +27,7 @@ struct Runtime {
     last_score_margin: f32,
     last_attribute_entropy: f32,
     last_attribute_margin: f32,
+    last_action_is_set: bool,
 }
 
 impl Runtime {
@@ -49,6 +52,7 @@ impl Runtime {
             last_score_margin: f32::NEG_INFINITY,
             last_attribute_entropy: f32::INFINITY,
             last_attribute_margin: f32::NEG_INFINITY,
+            last_action_is_set: false,
         })
     }
 
@@ -62,6 +66,7 @@ impl Runtime {
         self.last_score_margin = f32::NEG_INFINITY;
         self.last_attribute_entropy = f32::INFINITY;
         self.last_attribute_margin = f32::NEG_INFINITY;
+        self.last_action_is_set = false;
         true
     }
 
@@ -75,9 +80,10 @@ impl Runtime {
             .map_err(|error| error.to_string())?;
         self.session.truncate_autograd_graph(self.graph_boundary);
 
-        let Some(decision) = output.best_decision() else {
+        let Some(raw_decision) = output.best_raw_decision() else {
             return Err("policy produced no finite score".to_string());
         };
+        let decision = raw_decision.strongest_triple;
         let [first, second, third] = decision.triple;
         #[allow(clippy::cast_possible_truncation)]
         {
@@ -86,6 +92,7 @@ impl Runtime {
             self.last_attribute_entropy = decision.mean_attribute_entropy as f32;
             self.last_attribute_margin = decision.min_attribute_margin as f32;
         }
+        self.last_action_is_set = matches!(raw_decision.action, RawBoardAction::Set(_));
         let first = u32::try_from(first).map_err(|error| error.to_string())?;
         let second = u32::try_from(second).map_err(|error| error.to_string())?;
         let third = u32::try_from(third).map_err(|error| error.to_string())?;
@@ -177,6 +184,11 @@ pub extern "C" fn last_attribute_margin() -> f32 {
     with_runtime(|runtime| runtime.last_attribute_margin).unwrap_or(f32::NEG_INFINITY)
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn last_action_is_set() -> u32 {
+    u32::from(with_runtime(|runtime| runtime.last_action_is_set).unwrap_or(false))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CARD_PIXELS, Runtime};
@@ -195,6 +207,7 @@ mod tests {
         assert!(runtime.last_score_margin.is_infinite());
         assert!(runtime.last_attribute_entropy.is_finite());
         assert!(runtime.last_attribute_margin.is_finite());
+        assert_eq!(runtime.last_action_is_set, runtime.last_score >= 0.0);
         Ok(())
     }
 }

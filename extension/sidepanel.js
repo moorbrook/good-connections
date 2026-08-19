@@ -100,6 +100,7 @@ async function observeBoard(tab = undefined) {
     cardCount: geometry.rects.length,
     pixels,
     choice: [(packed >>> 16) & 255, (packed >>> 8) & 255, packed & 255],
+    actionIsSet: wasm.last_action_is_set() === 1,
     score: wasm.last_score(),
     scoreMargin: wasm.last_score_margin(),
     attributeEntropy: wasm.last_attribute_entropy(),
@@ -111,9 +112,15 @@ async function observeBoard(tab = undefined) {
 }
 
 function renderObservation(observation, accepted) {
-  choice.textContent = observation.choice.map((index) => index + 1).join(' · ')
+  choice.textContent = observation.actionIsSet
+    ? observation.choice.map((index) => index + 1).join(' · ')
+    : 'No SET'
   confidence.textContent = `score ${observation.score.toFixed(3)} · relation margin ${observation.scoreMargin.toFixed(3)} · attribute entropy ${observation.attributeEntropy.toFixed(3)} · weakest attribute margin ${observation.attributeMargin.toFixed(3)}`
-  status.textContent = accepted ? observation.summary : 'Abstained: repeated frames or decision diagnostics did not pass'
+  status.textContent = accepted
+    ? observation.summary
+    : observation.actionIsSet
+      ? 'Abstained: repeated frames or decision diagnostics did not pass'
+      : 'No SET predicted; no cards will be clicked'
   playButton.disabled = !accepted
 }
 
@@ -121,7 +128,7 @@ async function scanBoard() {
   const first = await observeBoard()
   await new Promise((resolve) => setTimeout(resolve, 90))
   const second = await observeBoard(first.tab)
-  const accepted = repeatedObservationPass(first, second)
+  const accepted = first.actionIsSet && second.actionIsSet && repeatedObservationPass(first, second)
   currentObservation = accepted ? second : undefined
   renderObservation(second, accepted)
   await chrome.tabs.sendMessage(currentTab.id, {

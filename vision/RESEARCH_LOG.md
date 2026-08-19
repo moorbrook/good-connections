@@ -821,3 +821,36 @@ hypergraph readers remain clearly named NumPy research harnesses; they are not
 yet the Rust browser policy. The next implementation milestone is to port the
 frozen differentiable relation/correction path, then validate the complete
 runtime policy without relaxing the conditional gate.
+
+## 2026-08-19 — Fill-texture policy promoted to the browser runtime
+
+The retained 8-channel/24-unit fill-texture topology is now honestly named
+`DeployedVisualSetPolicy`. Native training, native evaluation, MPSGraph
+training, and FrankenTorch/WASM inference select it by default. The temporary
+`--fill-texture-branch` opt-in and its separate research wrapper were removed;
+`--legacy-untyped` and `--wide-vision` remain explicit research alternatives.
+The selected replica-1 checkpoint was copied byte-for-byte into the embedded
+runtime input (`SHA-256 dc7819edafb75d80914a6f56d154a19d9e2e721a96f1dccfe2482a97f621717e`).
+
+This deployment does **not** claim to port the four-checkpoint contextual or
+hypergraph NumPy reader. The embedded single checkpoint scored 96.8628% raw on
+the 180xx development stream and 97.4976% raw on the disjoint 190xx stream.
+A linear diagnostic guard was fitted only on predicted-SET actions in the
+180xx records; predicted `NoSet` actions are never eligible for a browser
+click. Selecting the widest operating point with at least 99.9% accepted
+development accuracy gave 48.8525% coverage across all mixed boards and
+99.9000% accepted accuracy there. Frozen evaluation on 190xx gave 49.0234%
+coverage and 99.9004% accepted accuracy (4 accepted errors). These guarded
+metrics are runtime diagnostics, separate from the 100%-coverage board-v9
+research claim.
+
+The release WASM was rebuilt with the promoted checkpoint. Native strict-load
+tests, Rust unit tests, JavaScript tests, preprocessing and guard tests passed.
+The live headless screenshot path produced 12/12 valid SET proposals and
+clicked all 12 guarded actions with verified board transitions. A
+1,000-iteration Node/WASM sample measured 5.62 ms cached inference and 5.73 ms
+including pixel transfer. The one-step backend parity check used the retained MPSGraph
+attribute-loss weight of 4: MPSGraph loss `6.413500`, FrankenTorch loss
+`6.413499775`, with the first eight shared gradients agreeing to roughly
+`6e-8`. Running the native probe at its unrelated default weight of 0.35 is not
+a valid parity comparison.

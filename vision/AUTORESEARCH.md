@@ -37,18 +37,18 @@ larger model won one run” must not be described as a scaling law.
 
 ## Shared implementation boundary
 
-`../vision-policy/src/lib.rs` owns two explicit policy families. The WebAssembly runtime constructs
-`DeployedVisualSetPolicy` and loads the shipped legacy single-convolution checkpoint; the native
-trainer and reference evaluator construct `ResearchVisualSetPolicy` and load current
-dilated-residual research checkpoints. Their state-dict key families are intentionally different,
-and all loads remain strict. Never add a JavaScript inference copy, a key adapter, or a second
-export format.
+`../vision-policy/src/lib.rs` owns the canonical `DeployedVisualSetPolicy` plus explicitly named
+research controls. Native training, native evaluation, and WebAssembly inference construct the
+deployed 55,155-parameter typed-relation/fill-texture topology by default. The legacy untyped and
+wide candidates require `--legacy-untyped` and `--wide-vision`; incompatible state dictionaries
+remain strict-load errors. Never add a JavaScript inference copy, a key adapter, or a second export
+format.
 
-Fast training currently has a second, training-only expression of the research topology in
+Fast training currently has a second, training-only expression of the selected topology in
 `../vision-mpsgraph/src/policy_graph.rs`. MPSGraph performs the tensor operations on Apple GPU
-hardware; its checkpoint is converted into the research FrankenTorch state dictionary used by the
-native evaluator. This duplication is a deliberate temporary cost, not a shared implementation.
-Every research topology change must update both Rust modules and pass the fixed-batch
+hardware; its checkpoint is converted into the FrankenTorch state dictionary used by the native
+evaluator and browser build. This duplication is a deliberate temporary cost, not a shared
+implementation. Every topology change must update both Rust modules and pass the fixed-batch
 forward/loss/gradient parity probe before its result is comparable. A future shared declarative
 topology description would remove this hazard without adding a second runtime.
 

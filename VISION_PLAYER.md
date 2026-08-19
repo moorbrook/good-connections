@@ -13,29 +13,33 @@ does not read card labels, React state, solutions, or network payloads.
 
 ## Honest model description
 
-The project has two explicit compact learned convolutional policies, not a transformer:
-`DeployedVisualSetPolicy` is the shipped browser model, while `ResearchVisualSetPolicy` is the
-current native model-search topology. Neither has attention, a language model, a token sequence, or
-a recursive-language-model loop. They are therefore neither VLMs nor general VLAs. In the narrow
-control sense each is a vision-to-action policy: its action is the three card indices to select.
+The project uses compact learned convolutional policies, not a transformer.
+`DeployedVisualSetPolicy` is the canonical native and browser topology.
+`ResearchVisualSetPolicy`, `TypedRelationResearchPolicy`, and
+`WideTypedRelationResearchPolicy` are explicitly named experiment controls. None has attention, a
+language model, a token sequence, or a recursive-language-model loop. They are therefore neither
+VLMs nor general VLAs. In the narrow control sense each is a vision-to-action policy: its action is
+three card indices or the explicit `NoSet` action.
 
-The shipped 41,918-parameter `DeployedVisualSetPolicy` topology is:
+The shipped 55,155-parameter `DeployedVisualSetPolicy` topology is:
 
 1. Area-resample each card screenshot to 30×21 RGB.
 2. Apply a 5×5 stride-2 convolution from 3 to 12 channels and GELU.
 3. Fork into four attribute-specialist branches. Each applies its own 3×3 stride-2 convolution from
-   12 to 8 channels and GELU. `ResearchVisualSetPolicy` preserves this local path and adds a
-   rate-two dilated residual convolution in every branch; its checkpoint has a different state-dict
-   key family and is not a browser drop-in.
+   12 to 8 channels, a rate-two dilated 3×3 residual convolution, and GELU.
 4. In each branch, flatten the 8×6×8 feature map, project it to 24 features with GELU, and predict
    one group of three attribute logits.
-5. Softmax each attribute, sum the three cards' distributions, and score each attribute with a
-   shared 3→32→1 MLP.
-6. Combine the four relation features with a 4→16→1 MLP.
+5. Run a separate raw-RGB fill-texture path—3×3 stride 1, two 3×3 stride-2 convolutions, and a
+   384→24→3 head—and add its output only to the fill logits. It cannot directly alter count,
+   colour, or shape.
+6. Softmax each attribute, sum the three cards' distributions, and classify each attribute as
+   `same`, `different`, or `invalid` with a shared 3→32→3 MLP.
+7. Combine the twelve continuous relation probabilities with a 12→16→1 MLP.
 
 GELU is only the smooth nonlinearity between learned affine operators; it does not provide attention
 or memory. Each board card is encoded once, then the learned permutation-invariant relation scorer
-evaluates all 220 triples on a 12-card board. The highest logit becomes the three-position action.
+evaluates all 220 triples on a 12-card board. A non-negative highest logit selects that triple; a
+negative highest logit produces `NoSet`, which the extension displays without clicking.
 
 This repository uses constrained **model search**, not a scaling-law study and not runtime program
 synthesis. Experiments change one falsifiable aspect of the policy topology, operator choice,
@@ -55,11 +59,11 @@ failures, triple accuracy, measured latency, WASM size, and simplicity.
 | DOM capture, card rectangles, clicks | `extension/` | live browser |
 
 There is no handwritten browser copy of convolution, GELU, softmax, or relation scoring. WebAssembly
-constructs `DeployedVisualSetPolicy` and loads the shipped legacy single-convolution checkpoint;
-native training and evaluation construct `ResearchVisualSetPolicy` and load research checkpoints.
-The MPSGraph trainer temporarily duplicates the research topology in a training-only graph and
-exports the same `.ftsv` format; fixed-batch forward/loss/gradient parity checks guard that
-duplication. Strict loading keeps the two key families separate.
+constructs `DeployedVisualSetPolicy` and strictly loads its embedded checkpoint. Native training and
+evaluation now construct that same topology by default; `--legacy-untyped` and `--wide-vision` are
+explicit research alternatives. The MPSGraph trainer duplicates the selected topology in a
+training-only graph and exports the same `.ftsv` format; fixed-batch forward/loss/gradient parity
+checks guard that duplication. Strict loading rejects checkpoints from incompatible policy types.
 
 Two boundaries intentionally have separate adapters:
 
@@ -81,14 +85,14 @@ also renders several source raster widths before every card is reduced to 30×21
 theme and source-width buckets uniformly, preventing a large fixed-width corpus from silently
 dominating the responsive examples.
 
-Board-v5 research validation uses unseen renderer seeds, widths, DPR 1/2 captures, and six capture
+Historical Board-v5 validation used unseen renderer seeds, widths, DPR 1/2 captures, and six capture
 profiles: clean, blur, crop/zoom-in, shadow/scale-down, low contrast, and JPEG recompression. Its
 separate sealed corpus was rendered and hashed before training and evaluated exactly once after the
 recipe and guard were frozen. The current raw model is not universally reliable under scale shifts;
 the extension therefore abstains conservatively instead of presenting a raw argmax as safe.
 
-Board-v6 tested two raw-model architecture changes on fresh research seeds at 100% action coverage.
-The 41,918-parameter control scored 86.82% (540 failures in 4,096 boards). A spatial-pyramid specialist
+Historical Board-v6 tested two raw-model architecture changes on fresh research seeds at 100% action
+coverage. The 41,918-parameter control scored 86.82% (540 failures in 4,096 boards). A spatial-pyramid specialist
 regressed to 86.52% (552 failures) and was rejected. A parallel 3×3+5×5 specialist improved to
 87.38% (517 failures), mainly by reducing shadow errors, but worsened crop errors and remained far
 from the zero-failure promotion gate. The board-v6 sealed corpus therefore remains evaluator-
@@ -113,10 +117,9 @@ to commit `dd6daf414e84462d2e0f35d8c103e1321e758b44`. Architecture-search traini
 direct MPSGraph Rust crate in `vision-mpsgraph/`. MPSGraph is a training accelerator only; it is not
 a second browser inference runtime. The accelerated trainer exports through FrankenTorch's native
 state-dict serializer, and the native evaluator must accept and verify every exported checkpoint.
-`ft-serialize` remains the only checkpoint format. The native trainer and evaluator use
-`ResearchVisualSetPolicy`; the WASM crate loads only the separately shipped deployed state into
-`DeployedVisualSetPolicy`. `wasm-bindgen` supplies JavaScript glue; it does not reimplement model
-operators.
+`ft-serialize` remains the only checkpoint format. Native training, native evaluation, and WASM
+inference use `DeployedVisualSetPolicy` by default. `wasm-bindgen` supplies JavaScript glue; it does
+not reimplement model operators.
 
 The controlled specialist recipe runs with:
 
@@ -142,23 +145,24 @@ traps on `wasm32-unknown-unknown`. Native clock behavior is unchanged. Remove th
 provides a WASM-safe clock.
 
 Promote a validated deployed-topology checkpoint to `vision-artifacts/model/set-vision.ftsv`, then
-build and benchmark. Research checkpoints use the dilated-residual topology and cannot be copied
-into the browser artifact without retraining/exporting the deployed topology:
+build and benchmark:
 
 ```sh
 tools/build-vision-extension.sh
 node tools/benchmark-vision-wasm.mjs 100
+node tools/calibrate-vision-guard.mjs \
+  vision-artifacts/autoresearch-v9/dev-fill-texture-wide-r1-10k/abstention-samples.tsv 0.999
 ```
 
-Eight independent board-v5 training replications exposed substantial seed sensitivity. The selected
-unchanged-topology replicate had 487 failures on 4,096 research boards (88.11% raw board accuracy).
-Its one permitted 10,000-board sealed evaluation had 1,085 failures (89.15%). A research-only linear
-guard over relation score, score margin, attribute entropy, and weakest attribute margin accepted
-24.62% of sealed boards with 99.84% accepted accuracy (4 accepted errors). It was not retuned after
-the sealed result. In the rebuilt extension, all 12 responsive browser proposals were valid; 4 passed
-the guard and completed click plus pixel-change verification, while 8 safely abstained. A
-1,000-iteration Node/WASM benchmark measured 2.502 ms cached inference and 2.767 ms including pixel
-transfer per 12-card board.
+The embedded checkpoint is the selected single fill-texture replica, not the four-checkpoint NumPy
+contextual/hypergraph ensemble. On 8,192 disjoint 190xx boards it scored 97.4976% raw action
+accuracy. A linear diagnostic guard fitted only on predicted-SET actions from 180xx development data
+at a predeclared 99.9% accepted-accuracy operating point accepted 49.0234% of all disjoint mixed
+boards with 99.9004% accepted accuracy. Predicted `NoSet` actions never click. These guarded numbers
+are deployment diagnostics, not the board-v9 100%-coverage research claim. In the rebuilt extension,
+all 12 responsive browser proposals were valid and all 12 passed the guard, completed their clicks,
+and verified a pixel-level board transition. A 1,000-iteration Node/WASM benchmark measured 5.62 ms
+cached inference and 5.73 ms including pixel transfer per 12-card board on the current host.
 
 ## Load and use the extension
 
@@ -174,7 +178,7 @@ and a stable material board change after clicking. The extension requests
 `activeTab`, not blanket host access; the broader host permission in the headless integration test
 exists only in a temporary copied manifest because CDP clicks cannot grant `activeTab`.
 The displayed values are raw diagnostics, not a correctness probability: a perception error can
-still score confidently, as the four accepted sealed errors demonstrate.
+still score confidently, as the disjoint accepted errors demonstrate.
 
 ## Verification
 
@@ -182,6 +186,7 @@ still score confidently, as the four accepted sealed errors demonstrate.
 npm run build
 npm test
 node tools/test-vision-preprocessing.mjs
+node tools/test-vision-guard.mjs
 node tools/test-vision-extension.mjs
 cargo clippy --manifest-path vision-policy/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path vision-policy/Cargo.toml

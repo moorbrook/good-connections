@@ -19,7 +19,6 @@ const WIDE_SPECIALIST_CHANNELS: usize = 16;
 const WIDE_SPECIALIST_EMBED_DIM: usize = 48;
 const CONV_OUTPUT_HEIGHT: usize = 6;
 const CONV_OUTPUT_WIDTH: usize = 8;
-const SPECIALIST_FEATURES: usize = SPECIALIST_CHANNELS * CONV_OUTPUT_HEIGHT * CONV_OUTPUT_WIDTH;
 const FILL_TEXTURE_CHANNELS: usize = 8;
 const FILL_TEXTURE_EMBED_DIM: usize = 24;
 const FILL_TEXTURE_FEATURES: usize = FILL_TEXTURE_CHANNELS * CONV_OUTPUT_HEIGHT * CONV_OUTPUT_WIDTH;
@@ -180,64 +179,6 @@ impl std::error::Error for PolicyError {
 impl From<AutogradError> for PolicyError {
     fn from(error: AutogradError) -> Self {
         Self::Autograd(error)
-    }
-}
-
-struct DeployedAttributeHead {
-    convolution: Conv2d,
-    projection: Linear,
-    classifier: Linear,
-}
-
-impl DeployedAttributeHead {
-    fn new(session: &mut FrankenTorchSession) -> Result<Self, AutogradError> {
-        Ok(Self {
-            convolution: Conv2d::new(
-                session,
-                CONV_CHANNELS,
-                SPECIALIST_CHANNELS,
-                (3, 3),
-                (2, 2),
-                (1, 1),
-                true,
-            )?,
-            projection: Linear::new(session, SPECIALIST_FEATURES, SPECIALIST_EMBED_DIM, true)?,
-            classifier: Linear::new(session, SPECIALIST_EMBED_DIM, ATTRIBUTE_VALUE_COUNT, true)?,
-        })
-    }
-}
-
-impl Module for DeployedAttributeHead {
-    fn forward(
-        &self,
-        session: &mut FrankenTorchSession,
-        input: TensorNodeId,
-    ) -> Result<TensorNodeId, AutogradError> {
-        let card_count = session.tensor_shape(input)?[0];
-        let encoded = self.convolution.forward(session, input)?;
-        finish_attribute_head(
-            session,
-            encoded,
-            card_count,
-            SPECIALIST_FEATURES,
-            &self.projection,
-            &self.classifier,
-        )
-    }
-
-    fn parameters(&self) -> Vec<TensorNodeId> {
-        self.named_children()
-            .into_iter()
-            .flat_map(|(_, module)| module.parameters())
-            .collect()
-    }
-
-    fn named_children(&self) -> Vec<(String, &dyn Module)> {
-        vec![
-            ("convolution".to_string(), &self.convolution),
-            ("projection".to_string(), &self.projection),
-            ("classifier".to_string(), &self.classifier),
-        ]
     }
 }
 
@@ -725,68 +666,6 @@ impl<H: Module, const RELATION_CLASSES: usize, const SHARED_CHANNELS: usize> Mod
     }
 }
 
-/// The shipped browser policy. Its state dict uses the legacy
-/// `attribute_head_N.convolution.*` keys and the original single-convolution
-/// specialist topology.
-pub struct DeployedVisualSetPolicy {
-    core: PolicyCore<DeployedAttributeHead, 1, CONV_CHANNELS>,
-}
-
-impl fmt::Debug for DeployedVisualSetPolicy {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("DeployedVisualSetPolicy")
-            .field("input", &(CARD_HEIGHT, CARD_WIDTH, CHANNELS))
-            .field("shared_channels", &CONV_CHANNELS)
-            .field("specialist_channels", &SPECIALIST_CHANNELS)
-            .field("specialist_embedding_width", &SPECIALIST_EMBED_DIM)
-            .finish_non_exhaustive()
-    }
-}
-
-impl DeployedVisualSetPolicy {
-    pub fn new(session: &mut FrankenTorchSession) -> Result<Self, AutogradError> {
-        Ok(Self {
-            core: PolicyCore::new(session, DeployedAttributeHead::new)?,
-        })
-    }
-
-    pub fn forward_with_attributes(
-        &self,
-        session: &mut FrankenTorchSession,
-        input: TensorNodeId,
-    ) -> Result<(TensorNodeId, TensorNodeId), AutogradError> {
-        self.core.forward_with_attributes(session, input)
-    }
-
-    pub fn score_board(
-        &self,
-        session: &mut FrankenTorchSession,
-        pixels: Vec<f64>,
-        card_count: usize,
-    ) -> Result<BoardScores, PolicyError> {
-        self.core.score_board(session, pixels, card_count)
-    }
-}
-
-impl Module for DeployedVisualSetPolicy {
-    fn forward(
-        &self,
-        session: &mut FrankenTorchSession,
-        input: TensorNodeId,
-    ) -> Result<TensorNodeId, AutogradError> {
-        self.core.forward(session, input)
-    }
-
-    fn parameters(&self) -> Vec<TensorNodeId> {
-        self.core.parameters()
-    }
-
-    fn named_children(&self) -> Vec<(String, &dyn Module)> {
-        self.core.named_children()
-    }
-}
-
 /// The native model-search policy. Its state dict uses the current
 /// `attribute_head_N.local_convolution.*` and
 /// `attribute_head_N.dilated_residual_convolution.*` keys.
@@ -810,10 +689,9 @@ pub struct TypedRelationResearchPolicy {
     >,
 }
 
-/// V9 fill-frequency candidate. The standard typed policy is retained and a
-/// small raw-pixel texture branch adds a residual only to the three fill
-/// logits.
-pub struct FillTextureTypedRelationResearchPolicy {
+/// The canonical native and browser policy. It uses typed attribute relations
+/// and a raw-pixel texture residual that can modify only the three fill logits.
+pub struct DeployedVisualSetPolicy {
     core: PolicyCore<
         ResearchAttributeHead<CONV_CHANNELS, SPECIALIST_CHANNELS, SPECIALIST_EMBED_DIM>,
         RELATION_CLASS_COUNT,
@@ -872,10 +750,10 @@ impl TypedRelationResearchPolicy {
     }
 }
 
-impl fmt::Debug for FillTextureTypedRelationResearchPolicy {
+impl fmt::Debug for DeployedVisualSetPolicy {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("FillTextureTypedRelationResearchPolicy")
+            .debug_struct("DeployedVisualSetPolicy")
             .field("input", &(CARD_HEIGHT, CARD_WIDTH, CHANNELS))
             .field("fill_texture_channels", &FILL_TEXTURE_CHANNELS)
             .field("fill_texture_embedding_width", &FILL_TEXTURE_EMBED_DIM)
@@ -884,7 +762,7 @@ impl fmt::Debug for FillTextureTypedRelationResearchPolicy {
     }
 }
 
-impl FillTextureTypedRelationResearchPolicy {
+impl DeployedVisualSetPolicy {
     pub fn new(session: &mut FrankenTorchSession) -> Result<Self, AutogradError> {
         Ok(Self {
             core: PolicyCore::new_with_fill_texture(session, ResearchAttributeHead::new, true)?,
@@ -909,7 +787,7 @@ impl FillTextureTypedRelationResearchPolicy {
     }
 }
 
-impl Module for FillTextureTypedRelationResearchPolicy {
+impl Module for DeployedVisualSetPolicy {
     fn forward(
         &self,
         session: &mut FrankenTorchSession,
@@ -1070,9 +948,9 @@ mod tests {
     use ft_nn::Module;
 
     use super::{
-        ATTRIBUTE_COUNT, BoardScores, CARD_PIXELS, DeployedVisualSetPolicy,
-        FillTextureTypedRelationResearchPolicy, PolicyError, RawBoardAction,
-        ResearchVisualSetPolicy, TypedRelationResearchPolicy, WideTypedRelationResearchPolicy,
+        ATTRIBUTE_COUNT, BoardScores, CARD_PIXELS, DeployedVisualSetPolicy, PolicyError,
+        RawBoardAction, ResearchVisualSetPolicy, TypedRelationResearchPolicy,
+        WideTypedRelationResearchPolicy,
     };
 
     #[test]
@@ -1182,12 +1060,15 @@ mod tests {
         let deployed_state = deployed.state_dict(&deployed_session)?;
         for index in 0..ATTRIBUTE_COUNT {
             let legacy_weight = format!("attribute_head_{index}.convolution.weight");
-            let legacy_bias = format!("attribute_head_{index}.convolution.bias");
-            let research_weight = format!("attribute_head_{index}.local_convolution.weight");
-            assert!(deployed_state.contains_key(&legacy_weight));
-            assert!(deployed_state.contains_key(&legacy_bias));
-            assert!(!deployed_state.contains_key(&research_weight));
+            let local_weight = format!("attribute_head_{index}.local_convolution.weight");
+            let residual_weight =
+                format!("attribute_head_{index}.dilated_residual_convolution.weight");
+            assert!(!deployed_state.contains_key(&legacy_weight));
+            assert!(deployed_state.contains_key(&local_weight));
+            assert!(deployed_state.contains_key(&residual_weight));
         }
+        assert!(deployed_state.contains_key("fill_texture_head.fine_convolution.weight"));
+        assert!(deployed_state.contains_key("fill_texture_head.classifier.weight"));
 
         let mut deployed_reload_session = FrankenTorchSession::new(ExecutionMode::Strict);
         let deployed_reload = DeployedVisualSetPolicy::new(&mut deployed_reload_session)?;
@@ -1244,14 +1125,9 @@ mod tests {
                 .is_err()
         );
 
-        let mut texture_session = FrankenTorchSession::new(ExecutionMode::Strict);
-        let texture = FillTextureTypedRelationResearchPolicy::new(&mut texture_session)?;
-        let texture_state = texture.state_dict(&texture_session)?;
-        assert!(texture_state.contains_key("fill_texture_head.fine_convolution.weight"));
-        assert!(texture_state.contains_key("fill_texture_head.classifier.weight"));
         assert!(
             typed
-                .load_state_dict(&mut typed_session, &texture_state, true)
+                .load_state_dict(&mut typed_session, &deployed_state, true)
                 .is_err()
         );
 

@@ -20,9 +20,9 @@ SET head consumes the twelve soft probabilities (four attributes times three
 relation types), so no discrete operation interrupts backpropagation. Class
 names are assigned with `argmax` only for evaluation and explanation.
 
-The typed research policy has 44,448 learned parameters, 194 more than the v8
-research policy. The shipped browser checkpoint remains bound to the separate
-legacy deployed policy type.
+The typed baseline has 44,448 learned parameters, 194 more than the v8
+research policy. The later 55,155-parameter fill-texture extension is now the
+canonical deployed type; the baseline remains a research control.
 
 ## Raw board action
 
@@ -123,6 +123,7 @@ reached 99.0479% action accuracy. A disjoint replication using the 190xx render
 family and board seed `2026081903` reached 99.2188% overall at 100% coverage
 (99.4629% Has SET, 98.9746% No SET). The overall 99% goal has therefore
 replicated, but the stricter conditional gate remains open by one No SET error.
-The texture branch is implemented in Rust and MPSGraph; the contextual reader
-that produces the replicated result remains a research harness and must be
-ported before this can become the browser policy.
+The texture branch is now the canonical Rust, MPSGraph, and browser topology.
+The contextual reader that produces the replicated 99.2188% result remains a
+NumPy research harness. Therefore the browser honestly deploys one selected
+55,155-parameter checkpoint, not the complete four-model contextual result.

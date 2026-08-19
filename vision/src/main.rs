@@ -9,9 +9,8 @@ use ft_nn::{BCEWithLogitsLoss, CrossEntropyLoss, LossModule, Module};
 use ft_optim::{AdamW, Optimizer};
 use set_vision_data::{AtlasCollection, BoardKind, Rng, decode_card};
 use set_vision_policy::{
-    BoardDecision, BoardScores, CARD_PIXELS, FillTextureTypedRelationResearchPolicy,
-    RawBoardAction, ResearchVisualSetPolicy, TypedRelationResearchPolicy,
-    WideTypedRelationResearchPolicy,
+    BoardDecision, BoardScores, CARD_PIXELS, DeployedVisualSetPolicy, RawBoardAction,
+    ResearchVisualSetPolicy, WideTypedRelationResearchPolicy,
 };
 use std::io::Write;
 
@@ -66,28 +65,24 @@ fn attribute_loss_with_fill_multiplier(
 }
 
 #[derive(Debug)]
-enum ResearchPolicyVariant {
-    Legacy(ResearchVisualSetPolicy),
-    Typed(TypedRelationResearchPolicy),
-    WideTyped(WideTypedRelationResearchPolicy),
-    FillTextureTyped(FillTextureTypedRelationResearchPolicy),
+enum TrainingPolicyVariant {
+    LegacyResearch(ResearchVisualSetPolicy),
+    Deployed(DeployedVisualSetPolicy),
+    WideResearch(WideTypedRelationResearchPolicy),
 }
 
-impl ResearchPolicyVariant {
+impl TrainingPolicyVariant {
     fn new(
         session: &mut FrankenTorchSession,
         typed_relations: bool,
         wide_vision: bool,
-        fill_texture_branch: bool,
     ) -> Result<Self, ft_autograd::AutogradError> {
         if wide_vision {
-            WideTypedRelationResearchPolicy::new(session).map(Self::WideTyped)
-        } else if fill_texture_branch {
-            FillTextureTypedRelationResearchPolicy::new(session).map(Self::FillTextureTyped)
+            WideTypedRelationResearchPolicy::new(session).map(Self::WideResearch)
         } else if typed_relations {
-            TypedRelationResearchPolicy::new(session).map(Self::Typed)
+            DeployedVisualSetPolicy::new(session).map(Self::Deployed)
         } else {
-            ResearchVisualSetPolicy::new(session).map(Self::Legacy)
+            ResearchVisualSetPolicy::new(session).map(Self::LegacyResearch)
         }
     }
 
@@ -97,7 +92,7 @@ impl ResearchPolicyVariant {
         input: ft_autograd::TensorNodeId,
     ) -> Result<PolicyOutputs, ft_autograd::AutogradError> {
         match self {
-            Self::Legacy(policy) => {
+            Self::LegacyResearch(policy) => {
                 let (set_logits, attribute_logits) =
                     policy.forward_with_attributes(session, input)?;
                 Ok(PolicyOutputs {
@@ -106,7 +101,7 @@ impl ResearchPolicyVariant {
                     relations: None,
                 })
             }
-            Self::Typed(policy) => {
+            Self::Deployed(policy) => {
                 let (set_logits, attribute_logits, relation_logits) =
                     policy.forward_with_relations(session, input)?;
                 Ok(PolicyOutputs {
@@ -115,16 +110,7 @@ impl ResearchPolicyVariant {
                     relations: Some(relation_logits),
                 })
             }
-            Self::WideTyped(policy) => {
-                let (set_logits, attribute_logits, relation_logits) =
-                    policy.forward_with_relations(session, input)?;
-                Ok(PolicyOutputs {
-                    set: set_logits,
-                    attributes: attribute_logits,
-                    relations: Some(relation_logits),
-                })
-            }
-            Self::FillTextureTyped(policy) => {
+            Self::WideResearch(policy) => {
                 let (set_logits, attribute_logits, relation_logits) =
                     policy.forward_with_relations(session, input)?;
                 Ok(PolicyOutputs {
@@ -143,43 +129,39 @@ impl ResearchPolicyVariant {
         card_count: usize,
     ) -> Result<BoardScores, set_vision_policy::PolicyError> {
         match self {
-            Self::Legacy(policy) => policy.score_board(session, pixels, card_count),
-            Self::Typed(policy) => policy.score_board(session, pixels, card_count),
-            Self::WideTyped(policy) => policy.score_board(session, pixels, card_count),
-            Self::FillTextureTyped(policy) => policy.score_board(session, pixels, card_count),
+            Self::LegacyResearch(policy) => policy.score_board(session, pixels, card_count),
+            Self::Deployed(policy) => policy.score_board(session, pixels, card_count),
+            Self::WideResearch(policy) => policy.score_board(session, pixels, card_count),
         }
     }
 }
 
-impl Module for ResearchPolicyVariant {
+impl Module for TrainingPolicyVariant {
     fn forward(
         &self,
         session: &mut FrankenTorchSession,
         input: ft_autograd::TensorNodeId,
     ) -> Result<ft_autograd::TensorNodeId, ft_autograd::AutogradError> {
         match self {
-            Self::Legacy(policy) => policy.forward(session, input),
-            Self::Typed(policy) => policy.forward(session, input),
-            Self::WideTyped(policy) => policy.forward(session, input),
-            Self::FillTextureTyped(policy) => policy.forward(session, input),
+            Self::LegacyResearch(policy) => policy.forward(session, input),
+            Self::Deployed(policy) => policy.forward(session, input),
+            Self::WideResearch(policy) => policy.forward(session, input),
         }
     }
 
     fn parameters(&self) -> Vec<ft_autograd::TensorNodeId> {
         match self {
-            Self::Legacy(policy) => policy.parameters(),
-            Self::Typed(policy) => policy.parameters(),
-            Self::WideTyped(policy) => policy.parameters(),
-            Self::FillTextureTyped(policy) => policy.parameters(),
+            Self::LegacyResearch(policy) => policy.parameters(),
+            Self::Deployed(policy) => policy.parameters(),
+            Self::WideResearch(policy) => policy.parameters(),
         }
     }
 
     fn named_children(&self) -> Vec<(String, &dyn Module)> {
         match self {
-            Self::Legacy(policy) => policy.named_children(),
-            Self::Typed(policy) => policy.named_children(),
-            Self::WideTyped(policy) => policy.named_children(),
-            Self::FillTextureTyped(policy) => policy.named_children(),
+            Self::LegacyResearch(policy) => policy.named_children(),
+            Self::Deployed(policy) => policy.named_children(),
+            Self::WideResearch(policy) => policy.named_children(),
         }
     }
 }
@@ -214,12 +196,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = Rng::new(config.seed);
 
     let mut session = FrankenTorchSession::new(ExecutionMode::Strict);
-    let model = ResearchPolicyVariant::new(
-        &mut session,
-        config.typed_relations,
-        config.wide_vision,
-        config.fill_texture_branch,
-    )?;
+    let model =
+        TrainingPolicyVariant::new(&mut session, config.typed_relations, config.wide_vision)?;
     if config.eval_only || config.probe_only {
         let checkpoint = config.output_dir.join("set-vision.ftsv");
         let state = ft_serialize::load_state_dict(&checkpoint)?;
@@ -229,11 +207,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let graph_boundary = session.autograd_graph_node_count();
     let mut ensemble = if let Some(output_dir) = config.ensemble_output_dir.as_ref() {
         let mut ensemble_session = FrankenTorchSession::new(ExecutionMode::Strict);
-        let ensemble_model = ResearchPolicyVariant::new(
+        let ensemble_model = TrainingPolicyVariant::new(
             &mut ensemble_session,
             config.typed_relations,
             config.wide_vision,
-            config.fill_texture_branch,
         )?;
         let checkpoint = output_dir.join("set-vision.ftsv");
         let state = ft_serialize::load_state_dict(&checkpoint)?;
@@ -243,11 +220,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut third = None;
         if let Some(third_output_dir) = config.ensemble_third_output_dir.as_ref() {
             let mut third_session = FrankenTorchSession::new(ExecutionMode::Strict);
-            let third_model = ResearchPolicyVariant::new(
+            let third_model = TrainingPolicyVariant::new(
                 &mut third_session,
                 config.typed_relations,
                 config.wide_vision,
-                config.fill_texture_branch,
             )?;
             let third_checkpoint = third_output_dir.join("set-vision.ftsv");
             let third_state = ft_serialize::load_state_dict(&third_checkpoint)?;
@@ -263,11 +239,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut fourth = None;
         if let Some(fourth_output_dir) = config.ensemble_fourth_output_dir.as_ref() {
             let mut fourth_session = FrankenTorchSession::new(ExecutionMode::Strict);
-            let fourth_model = ResearchPolicyVariant::new(
+            let fourth_model = TrainingPolicyVariant::new(
                 &mut fourth_session,
                 config.typed_relations,
                 config.wide_vision,
-                config.fill_texture_branch,
             )?;
             let fourth_checkpoint = fourth_output_dir.join("set-vision.ftsv");
             let fourth_state = ft_serialize::load_state_dict(&fourth_checkpoint)?;
@@ -543,13 +518,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 struct EnsembleMember {
     session: FrankenTorchSession,
-    model: ResearchPolicyVariant,
+    model: TrainingPolicyVariant,
     graph_boundary: usize,
 }
 
 struct EnsemblePolicy {
     session: FrankenTorchSession,
-    model: ResearchPolicyVariant,
+    model: TrainingPolicyVariant,
     graph_boundary: usize,
     third: Option<EnsembleMember>,
     fourth: Option<EnsembleMember>,
@@ -621,7 +596,7 @@ struct AtlasEvaluation {
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn evaluate(
     session: &mut FrankenTorchSession,
-    model: &ResearchPolicyVariant,
+    model: &TrainingPolicyVariant,
     mut ensemble: Option<&mut EnsemblePolicy>,
     atlases: &AtlasCollection,
     graph_boundary: usize,
@@ -1129,7 +1104,7 @@ fn average_logits(
 
 fn policy_value_outputs(
     session: &mut FrankenTorchSession,
-    model: &ResearchPolicyVariant,
+    model: &TrainingPolicyVariant,
     pixels: Vec<f64>,
     batch_size: usize,
 ) -> Result<PolicyValueOutputs, Box<dyn std::error::Error>> {

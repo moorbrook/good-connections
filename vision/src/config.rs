@@ -35,7 +35,6 @@ pub(crate) struct TrainConfig {
     pub(crate) mixed_boards: bool,
     pub(crate) board_correlated_negatives: bool,
     pub(crate) wide_vision: bool,
-    pub(crate) fill_texture_branch: bool,
 }
 
 impl Default for TrainConfig {
@@ -69,12 +68,11 @@ impl Default for TrainConfig {
             triple_seed: DEFAULT_TRIPLE_SEED,
             board_seed: DEFAULT_BOARD_SEED,
             augment: true,
-            typed_relations: false,
+            typed_relations: true,
             export_board_evidence: false,
             mixed_boards: false,
             board_correlated_negatives: false,
             wide_vision: false,
-            fill_texture_branch: false,
         }
     }
 }
@@ -114,11 +112,11 @@ impl TrainConfig {
                 "--board-seed" => config.board_seed = parse_value(&mut args, &flag)?,
                 "--no-augment" => config.augment = false,
                 "--typed-relations" => config.typed_relations = true,
+                "--legacy-untyped" => config.typed_relations = false,
                 "--export-board-evidence" => config.export_board_evidence = true,
                 "--mixed-boards" => config.mixed_boards = true,
                 "--board-correlated-negatives" => config.board_correlated_negatives = true,
                 "--wide-vision" => config.wide_vision = true,
-                "--fill-texture-branch" => config.fill_texture_branch = true,
                 "--atlas-dir" => config.atlas_dir = PathBuf::from(next_value(&mut args, &flag)?),
                 "--validation-atlas-dir" => {
                     config.validation_atlas_dir = PathBuf::from(next_value(&mut args, &flag)?);
@@ -197,14 +195,6 @@ impl TrainConfig {
         }
         if self.wide_vision && !self.typed_relations {
             return Err("--wide-vision requires --typed-relations".to_string());
-        }
-        if self.fill_texture_branch && !self.typed_relations {
-            return Err("--fill-texture-branch requires --typed-relations".to_string());
-        }
-        if self.fill_texture_branch && self.wide_vision {
-            return Err(
-                "--fill-texture-branch and --wide-vision are mutually exclusive".to_string(),
-            );
         }
         if self.export_board_evidence && !self.typed_relations {
             return Err("--export-board-evidence requires --typed-relations".to_string());
@@ -306,7 +296,7 @@ impl TrainConfig {
          [--learning-rate RATE] [--attribute-loss-weight WEIGHT] [--seed N] [--atlas-dir PATH] \
          [--fill-loss-multiplier MULTIPLIER] \
          [--relation-loss-weight WEIGHT] [--negative-logsumexp-loss-weight WEIGHT] \
-         [--typed-relations] [--mixed-boards] [--board-correlated-negatives] [--wide-vision] [--fill-texture-branch] \
+         [--legacy-untyped] [--mixed-boards] [--board-correlated-negatives] [--wide-vision] \
          [--export-board-evidence] \
          [--validation-atlas-dir PATH] [--output-dir PATH] [--eval-only] \
          [--ensemble-output-dir PATH] \
@@ -402,9 +392,8 @@ mod tests {
     }
 
     #[test]
-    fn typed_relation_and_mixed_board_modes_are_explicit() {
+    fn deployed_typed_relations_are_the_default() {
         let args = [
-            "--typed-relations",
             "--mixed-boards",
             "--export-board-evidence",
             "--relation-loss-weight",
@@ -434,9 +423,13 @@ mod tests {
 
     #[test]
     fn negative_logsumexp_loss_requires_typed_relations_and_even_batch() {
-        let untyped = ["--negative-logsumexp-loss-weight", "1.0"]
-            .into_iter()
-            .map(str::to_string);
+        let untyped = [
+            "--legacy-untyped",
+            "--negative-logsumexp-loss-weight",
+            "1.0",
+        ]
+        .into_iter()
+        .map(str::to_string);
         assert!(TrainConfig::from_iter(untyped).is_err());
 
         let odd = [
@@ -455,22 +448,14 @@ mod tests {
             .map(str::to_string);
         assert!(TrainConfig::from_iter(missing_loss).is_err());
 
-        let untyped_wide = ["--wide-vision"].into_iter().map(str::to_string);
+        let untyped_wide = ["--legacy-untyped", "--wide-vision"]
+            .into_iter()
+            .map(str::to_string);
         assert!(TrainConfig::from_iter(untyped_wide).is_err());
 
-        let untyped_texture = ["--fill-texture-branch"].into_iter().map(str::to_string);
-        assert!(TrainConfig::from_iter(untyped_texture).is_err());
-
-        let conflicting_vision = [
-            "--typed-relations",
-            "--wide-vision",
-            "--fill-texture-branch",
-        ]
-        .into_iter()
-        .map(str::to_string);
-        assert!(TrainConfig::from_iter(conflicting_vision).is_err());
-
-        let untyped_export = ["--export-board-evidence"].into_iter().map(str::to_string);
+        let untyped_export = ["--legacy-untyped", "--export-board-evidence"]
+            .into_iter()
+            .map(str::to_string);
         assert!(TrainConfig::from_iter(untyped_export).is_err());
 
         let invalid_fill = ["--fill-loss-multiplier", "0"]
@@ -480,17 +465,16 @@ mod tests {
     }
 
     #[test]
-    fn fill_texture_branch_is_an_explicit_typed_candidate() {
-        let args = ["--typed-relations", "--fill-texture-branch"]
-            .into_iter()
-            .map(str::to_string);
-        let config = TrainConfig::from_iter(args)
+    fn legacy_untyped_mode_is_explicit() {
+        let config = TrainConfig::from_iter(["--legacy-untyped".to_string()])
             .ok()
             .flatten()
             .unwrap_or_default();
-        assert!(config.typed_relations);
-        assert!(config.fill_texture_branch);
+        assert!(!config.typed_relations);
         assert!(!config.wide_vision);
+
+        let default = TrainConfig::default();
+        assert!(default.typed_relations);
     }
 
     #[test]

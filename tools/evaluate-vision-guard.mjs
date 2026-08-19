@@ -18,13 +18,14 @@ for (const row of rows) {
   const atlas = values[column.atlas]
   const profile = atlas.match(/-p(blur|crop|shadow|lowcontrast|jpeg|defocus|tilt|occlusion|gamut|compound)/)?.[1] ?? 'clean'
   const correct = values[column.correct] === '1'
+  const strongestIsSet = values[column.strongest_is_set] === '1'
   const observation = {
     score: Number(values[column.score]),
     scoreMargin: Number(values[column.score_margin]),
     attributeEntropy: Number(values[column.mean_attribute_entropy]),
     attributeMargin: Number(values[column.min_attribute_margin]),
   }
-  const accepted = diagnosticsPass(observation)
+  const accepted = strongestIsSet && diagnosticsPass(observation)
   const group = groups.get(profile) ?? { boards: 0, errors: 0, accepted: 0, acceptedErrors: 0 }
   for (const stats of [overall, group]) {
     stats.boards++
