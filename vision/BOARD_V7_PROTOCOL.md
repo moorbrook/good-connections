@@ -89,23 +89,37 @@ factor to the loader.
 
 ## Raw evaluation and selection
 
-Use the existing FrankenTorch evaluator without source changes:
+The full corpus is intentionally evaluated as three sequential 172-atlas
+shards. Loading all 516 atlases in one process exceeds the 24 GB memory budget
+(`516 * 81 * 190 * 140 * 3 * f64` is about 26.7 GB before allocator overhead).
+An eval-only process skips the training atlas and holds only its validation
+shard. Use the deterministic research helper, which verifies the locked corpus
+digest, builds the evaluator, and writes one log per shard:
 
 ```sh
-cargo run --release --manifest-path vision/Cargo.toml -- \
-  --eval-only \
-  --eval-batches 1024 \
-  --eval-boards 8192 \
-  --validation-atlas-dir "$PWD/vision-artifacts/board-v7-research-atlases" \
-  --output-dir <candidate-artifact-dir>
+tools/evaluate-board-v7-research-shards.sh \
+  <candidate-checkpoint-dir> <new-output-dir>
 ```
 
-The evaluator's fixed triple RNG (`0xa11c_e5ed_5eed`) and board RNG
-(`0xb0a4_d5e7_5eed`) remain the protocol seeds. Keep `--eval-batches 1024`
-and `--eval-boards 8192` unchanged for every control and candidate. Report
-aggregate and per-profile failures, plus theme, width, DPR, and failed
-attribute counts. The board decision is always the highest-scoring raw
-triple; every board counts, including low-margin decisions.
+The helper's fixed allocation is:
+
+| atlas seed | triple seed | board seed | triple batches | raw boards |
+| ---: | ---: | ---: | ---: | ---: |
+| 15001 | 177145488695021 | 194222009835245 | 342 | 2,731 |
+| 15002 | 177145488695022 | 194222009835246 | 341 | 2,731 |
+| 15003 | 177145488695023 | 194222009835247 | 341 | 2,730 |
+| **total** |  |  | **1,024** | **8,192** |
+
+The distinct shard RNGs are the default protocol seeds
+(`0xa11c_e5ed_5eed` and `0xb0a4_d5e7_5eed`) plus the shard index. The
+evaluator also accepts these seeds explicitly as `--triple-seed N` and
+`--board-seed N`; the defaults remain for compatibility, but a v7 result must
+record the per-shard values above. Run shards sequentially, never in parallel.
+The helper's `results.tsv` and `aggregate.txt` must show exactly 65,536
+triples and 8,192 raw boards. Report aggregate and per-profile failures, plus
+theme, width, DPR, and failed attribute counts. The board decision is always
+the highest-scoring raw triple; every board counts, including low-margin
+decisions.
 
 Rank candidates lexicographically by:
 
@@ -121,7 +135,11 @@ be 98.999%); candidates below that threshold must leave the sealed corpus
 evaluator-unopened. If multiple candidates clear the threshold, select the
 research winner under the ranking above and evaluate that checkpoint once on a
 separately fixed 10,000-board raw run; those results are an assessment, not a
-tuning signal.
+tuning signal. The sealed run must also be sequential and memory-bounded, with
+the fixed sealed-board allocation 3,334 / 3,333 / 3,333 for seeds 16001 /
+16002 / 16003, respectively, and must aggregate exactly 10,000 boards. Do
+not open the sealed corpus or create sealed predictions before a candidate has
+cleared the research gate.
 
 This protocol supports only finite-distribution claims such as “at least 99%
 raw accuracy at full coverage in 8,192 research boards” or “0 failures in

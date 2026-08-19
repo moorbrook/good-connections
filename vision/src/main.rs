@@ -18,7 +18,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     };
     std::fs::create_dir_all(&config.output_dir)?;
-    let atlases = AtlasCollection::load(&config.atlas_dir)?;
+    // Evaluation-only runs do not need the training corpus. Avoid loading it so
+    // a shard process holds only its validation atlas in memory.
+    let atlases = if config.eval_only && !config.probe_only {
+        None
+    } else {
+        Some(AtlasCollection::load(&config.atlas_dir)?)
+    };
     let validation_atlases = AtlasCollection::load(&config.validation_atlas_dir)?;
     let mut rng = Rng::new(config.seed);
 
@@ -33,6 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let graph_boundary = session.autograd_graph_node_count();
 
     if config.probe_only {
+        let atlases = atlases.as_ref().ok_or("probe requires an atlas corpus")?;
         let mut probe_rng = Rng::new(99005);
         let batch = atlases.make_batch(&mut probe_rng, 64, false);
         let input = session.tensor_variable(batch.pixels, vec![64, 3, CARD_PIXELS], false)?;
@@ -58,6 +65,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if !config.eval_only {
+        let atlases = atlases
+            .as_ref()
+            .ok_or("training requires an atlas corpus")?;
         let mut optimizer =
             AdamW::new(model.parameters(), config.learning_rate).weight_decay(1.0e-4);
         println!(
@@ -113,9 +123,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         graph_boundary,
         config.eval_batches,
         config.eval_boards,
+        config.triple_seed,
+        config.board_seed,
     )?;
+    println!("triple_seed: {}", config.triple_seed);
+    println!("board_seed: {}", config.board_seed);
     println!("triple_accuracy: {:.6}", evaluation.triple_accuracy);
+    println!(
+        "triple_correct: {}/{}",
+        evaluation.triple_correct, evaluation.triple_total
+    );
     println!("attribute_accuracy: {:.6}", evaluation.attribute_accuracy);
+    println!(
+        "attribute_correct: {}/{}",
+        evaluation.attribute_correct, evaluation.attribute_total
+    );
     println!(
         "attribute_accuracy_by_kind: count={:.6},colour={:.6},shape={:.6},fill={:.6}",
         evaluation.attribute_accuracy_by_kind[0],
@@ -152,6 +174,10 @@ struct Evaluation {
     attribute_accuracy_by_kind: [f64; 4],
     board_accuracy: f64,
     board_failures: usize,
+    triple_correct: usize,
+    triple_total: usize,
+    attribute_correct: usize,
+    attribute_total: usize,
     seconds: f64,
     atlases: Vec<AtlasEvaluation>,
     abstention_samples: Vec<AbstentionSample>,
@@ -180,6 +206,8 @@ fn evaluate(
     graph_boundary: usize,
     batches: usize,
     boards: usize,
+    triple_seed: u64,
+    board_seed: u64,
 ) -> Result<Evaluation, Box<dyn std::error::Error>> {
     const BATCH_SIZE: usize = 64;
     const BOARD_CARDS: usize = 12;
@@ -192,8 +220,8 @@ fn evaluate(
     let mut atlas_board_correct = vec![0_usize; atlases.len()];
     let mut atlas_board_total = vec![0_usize; atlases.len()];
     let mut abstention_samples = Vec::with_capacity(boards);
-    let mut triple_rng = Rng::new(0xa11c_e5ed_5eed);
-    let mut board_rng = Rng::new(0xb0a4_d5e7_5eed);
+    let mut triple_rng = Rng::new(triple_seed);
+    let mut board_rng = Rng::new(board_seed);
     session.no_grad_enter();
     for _ in 0..batches {
         let batch = atlases.make_batch(&mut triple_rng, BATCH_SIZE, false);
@@ -306,6 +334,10 @@ fn evaluate(
         }),
         board_accuracy: ratio(boards - board_failures, boards)?,
         board_failures,
+        triple_correct,
+        triple_total,
+        attribute_correct,
+        attribute_total,
         seconds: started.elapsed().as_secs_f64(),
         abstention_samples,
         atlases: (0..atlases.len())
