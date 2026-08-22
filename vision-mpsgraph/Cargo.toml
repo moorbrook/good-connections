@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+default = []
+high-resolution = [
+  "set-vision-contract/high-resolution",
+  "set-vision-data/high-resolution",
+]
+
 [dependencies]
 ft-core = { package = "frankentorch-core", git = "https://github.com/Dicklesworthstone/frankentorch", rev = "dd6daf414e84462d2e0f35d8c103e1321e758b44" }
 ft-serialize = { git = "https://github.com/Dicklesworthstone/frankentorch", rev = "dd6daf414e84462d2e0f35d8c103e1321e758b44" }

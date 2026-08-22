@@ -7,6 +7,7 @@ import {
   generateBoard,
   generateModeA,
   generateModeB,
+  generateNoSetBoard,
   BOARD_SIZE,
   MODE_A_SET_COUNT,
   type Board,
@@ -94,6 +95,19 @@ describe('generateModeB (unknown count)', () => {
     const b = generateModeB(mulberry32(2024))
     expect(a.cards.map(cardId)).toEqual(b.cards.map(cardId))
     expect(a.sets).toEqual(b.sets)
+  })
+})
+
+describe('generateNoSetBoard (vision-policy evaluation)', () => {
+  it('produces deterministic valid boards with no SET', () => {
+    for (let seed = 0; seed < 200; seed++) {
+      const board = generateNoSetBoard(mulberry32(seed))
+      assertValidBoard(board)
+      expect(board.sets).toHaveLength(0)
+    }
+    const first = generateNoSetBoard(mulberry32(2026))
+    const second = generateNoSetBoard(mulberry32(2026))
+    expect(first.cards.map(cardId)).toEqual(second.cards.map(cardId))
   })
 })
 

@@ -858,3 +858,684 @@ attribute-loss weight of 4: MPSGraph loss `6.413500`, FrankenTorch loss
 `6.413499775`, with the first eight shared gradients agreeing to roughly
 `6e-8`. Running the native probe at its unrelated default weight of 0.35 is not
 a valid parity comparison.
+
+## 2026-08-19 — Unbounded generative evaluation and curriculum feedback
+
+The fixed twelve-case extension test was generalized into an unbounded browser stream. Each case
+uses fresh deterministic board and renderer seeds plus randomized theme, capture profile, viewport, and DPR, with an
+exactly balanced `HasSet`/`NoSet` schedule. Inference remains pixel-only; the harness reads DOM card
+IDs only after the action is frozen. Every mining failure is appended as a reproducible JSONL
+curriculum record, and subsequent mining samples mix fresh cases with nearby conditions derived from
+the accumulated failures. This is active curriculum discovery, not online weight updating: a later
+training cycle consumes the regenerated cases.
+
+The adaptive miner and scoring auditor are deliberately separate. `--audit` refuses curriculum
+input and does not write failures, so its fixed root seed can support honest evaluation. Once an
+audit is inspected or its failures enter the curriculum, that stream is retired as development
+data.
+
+The headless browser bridge was also corrected. It now captures the current live game tab on every
+request through CDP; it no longer substitutes a pre-rendered unrelated board after a click. Thus a
+passing transition assertion now observes the actual post-click page state.
+
+## 2026-08-20 — Failure curriculum connected to both native trainers
+
+The mining journal can now drive a real subsequent training cycle without materializing a generated
+bitmap corpus. `tools/render-vision-curriculum.mjs` reconstructs each unique failure with the
+production responsive board renderer, captures it in memory, and applies the extension's 30×21 RGB
+area-resampling contract. It writes a versioned binary stream containing twelve normalized card
+tensors plus the post-prediction board/action labels. The symbolic JSONL remains the only persistent
+curriculum artifact; PNGs are neither created nor retained.
+
+`set-vision-data` validates and decodes that stream, verifies that the board IDs agree with the
+declared Has-SET/No-SET kind, and creates balanced failure-centered batches. Exact observed pixels
+supply all available positive and negative triples. For a No-SET board, the exact board supplies the
+correlated negative half while ordinary procedural training supplies the positive half. The wrongly
+selected triple is placed first among negatives when applicable. Board IDs are supervision at
+training time only; browser inference remains pixel-only.
+
+Both the fast MPSGraph trainer and the FrankenTorch reference trainer accept `--curriculum-stdin`
+and `--curriculum-rate`. The rate selects failure-centered optimizer batches; audit/eval-only mode
+rejects curriculum input. An end-to-end smoke replayed the known `signal`/`blur` No-SET failure from
+root seed `20260823`, iteration 26. MPSGraph completed a curriculum-only step in 8.57 ms after graph
+compilation, and the reference trainer completed the same framed-input training path. These are
+plumbing checks, not evidence that the resulting model improves generalization; promotion still
+requires a fresh, feedback-free audit stream.
+
+## 2026-08-20 — Active-v10 rate sweep precommitted
+
+Before candidate training, the active-v10 protocol was fixed in `ACTIVE_V10_PROTOCOL.md`. A
+fresh-only 256-board browser stream at root seed `2026082001` produced 16 raw failures and exactly
+matched 93.75% Has-SET and No-SET accuracy. The errors span clean and altered captures, all four
+themes, DPR 1 and 2, small and large cards, false SET selections, wrong triples on Has-SET boards,
+and false No-SET actions. This stream and its 16 failures are development data.
+
+The controlled candidates use curriculum rates `0/0.02/0.05/0.10/0.20` with identical topology,
+base corpus, optimizer budget, data seed, and initialization seed. A separate curriculum RNG and an
+always-generated base batch ensure that changing rate does not perturb the ordinary data sequence.
+Selection uses 4,096 exposed research boards at 100% raw coverage. The selected checkpoint then gets
+one 1,000-board feedback-free browser audit at the already fixed root seed `2026082099`; its
+predeclared gate is 98.0% overall and 97.5% for each board kind. No audit result appears below this
+entry because candidate training had not begun when the protocol was recorded.
+
+**Full-batch result.** Rate zero reproduced the deployed checkpoint exactly
+(`dc7819edafb75d80914a6f56d154a19d9e2e721a96f1dccfe2482a97f621717e`) and scored 117/4,096
+failures. Full curriculum-batch rates `0.02/0.05/0.10/0.20` scored `127/153/151/157` failures. The
+approach is rejected: every nonzero candidate regressed both raw board accuracy and triple accuracy.
+Before additional training, the protocol was amended with four sparse within-batch candidates that
+replace at most 2 or 4 of 64 base samples. This tests whether hard examples help when they cannot
+monopolize an optimizer step; the audit remains unopened.
+
+**Sparse result.** Replacing one example per label in 25%, 50%, and 100% of batches produced
+`123/110/141` failures; replacing two per label in every batch produced 125. The predeclared winner
+is `p1-r050`: 110/4,096 failures (**97.3145%**) versus the control's 117 (**97.1436%**). Has-SET
+improved from 97.6074% to 97.7539%, No-SET from 96.6797% to 96.8750%, triple accuracy from 96.2524%
+to 97.0032%, and attribute accuracy from 99.6780% to 99.7248%. Its checkpoint SHA-256 is
+`b2e763d5bf3604734dc3fe491ba47d0ef47dc2bc53e23d1fdf35cb25ca146b2e`. This is a modest exposed
+development improvement, not yet a robustness claim. The fixed browser audit remains unopened at
+this point.
+
+**Fresh browser audit result.** The selected `p1-r050` checkpoint passed the fixed extension smoke
+test and then ran exactly once on all 1,000 predeclared, feedback-free boards at root seed
+`2026082099`. It scored **95.2% raw accuracy** (48 failures), split into 96.6% Has-SET and 93.8%
+No-SET. Guarded accuracy was 99.4169%, but at only 34.3% coverage and therefore does not alter the
+raw result. The candidate misses every predeclared raw gate and is rejected. Most false proposals
+violated exactly one true attribute, commonly shape or fill; the maximum over 220 triples amplifies
+these locally plausible errors on No-SET boards. This audit is now exposed and retired. Its 48
+failure records are development data for active-v11, whose candidate and fresh-audit rules were
+locked in `ACTIVE_V11_PROTOCOL.md` before the next mining stream began.
+
+## 2026-08-20 — Active-v11 targeted replay
+
+The predeclared focused miner started with the 16 original development failures and 48 failures from
+the now-retired active-v10 audit. On 768 boards at root seed `2026082101`, 202 were fresh and 566
+were curriculum-derived, including 146 exact replays. The intentionally hard stream scored 62.5%
+raw and added 288 failure records. The resulting journal has 352 records and 219 unique rendering
+conditions after exact-condition deduplication, covering both board kinds and all ten capture
+profiles. These figures measure curriculum hardness, not generalization.
+
+The replay mixer now has an explicit `--targeted-curriculum` mode in both trainers. It preserves the
+ordinary batch first, then replaces only labels implicated by the failure: a No-SET false positive
+adds its selected hard negative; a Has-SET false negative adds an exact positive; a wrong proposal
+on a Has-SET board adds both. The old symmetric mixer remains the default and is a controlled
+candidate. Unit tests verify that targeted No-SET replay leaves every positive slot unchanged and
+targeted Has-SET false-negative replay leaves every negative slot unchanged. The framed
+browser-to-MPSGraph path also completed a real one-step smoke run.
+
+**Targeted sweep result.** On the fixed 4,096-board exposed atlas evaluation, expanded symmetric
+replay at rate 0.50 regressed to 137 failures. Targeted replay produced 131 failures at rate 0.50,
+129 at rate 1.00 with one implicated example per label, and 115 at rate 1.00 with up to two. The
+last candidate reached 97.1924% raw, split 97.8027% Has-SET and 96.5820% No-SET, with 99.7060%
+attribute accuracy. Targeting therefore beats symmetric replay at comparable exposure, and a second
+hard example restores some No-SET balance, but none beats the active-v10 reference's 110 atlas
+failures. Per the precommit, the best three targeted checkpoints and unchanged reference advance to
+the separate 512-board browser development comparison at root seed `2026082102`.
+
+**Browser selection result.** The unchanged active-v10 reference scored 35/512 failures (93.1641%,
+95.7031% Has-SET, 90.6250% No-SET). Targeted `r100-p2` scored 34 (93.3594%, 95.7031%, 91.0156%);
+targeted `r100-p1` and `r050-p1` each scored 38. The two-example model therefore wins the locked
+rule by one board, an intentionally modest development result rather than a claim of improvement.
+Its checkpoint SHA-256 is `52036c615e1c6a695996d7d184611ea4f41e9e68cd06bdc659a50935465494d4`.
+The extension rebuilt with that exact checkpoint and passed all 12 fixed raw proposals; six guarded
+actions clicked and verified a live pixel transition.
+
+**Fresh audit result.** The selected checkpoint then ran exactly once on all 1,000 predeclared
+boards at root seed `2026082199`. It scored **94.7% raw** (53 failures), split 98.0% Has-SET and
+91.4% No-SET. Guarded accuracy was 99.6226% at 26.5% coverage. Targeted replay therefore improved
+recall while pushing too many locally plausible triples above the raw zero boundary; it worsened the
+No-SET extreme-value problem and misses the gate decisively. This audit is exposed and retired.
+
+## 2026-08-20 — Active-v12 aligned checkpoint soups
+
+Active-v11's fresh audit exceeded its 20-failure overall allowance before completion, so
+`ACTIVE_V12_PROTOCOL.md` locked the next experiment before any soup was constructed. A new strict
+Rust utility linearly interpolates matching F64 tensors and rejects key, metadata, length, dtype, or
+finite-value violations. The two fixed ingredients share topology, initialization, base-batch RNG,
+and schedule: the active-v10 reference and active-v11 targeted `r100-p2`.
+
+On the exposed 4,096-board atlas stream, primary weights `0.25/0.50/0.75` for the active-v11
+checkpoint produced `101/98/103` failures. All beat both endpoints (110 and 115); the 50/50 soup
+reached **97.6074% raw**, split 98.1934% Has-SET and 97.2168% No-SET. This is one 55,155-parameter
+model with unchanged inference cost, not a runtime ensemble. The best two soups and both endpoints
+advance to the predeclared browser development seed `2026082201`; no browser result was inspected
+before this entry.
+
+**Browser selection result.** On the identical 512 live-browser boards, the 50/50 soup scored
+19 failures (**96.2891%**, 97.6563% Has-SET, 94.9219% No-SET). The 25%-primary soup, active-v10
+endpoint, and active-v11 endpoint scored 23, 36, and 27 failures respectively. The midpoint nearly
+halved the old reference's errors and improved both conditionals, so it wins the locked rule. Its
+SHA-256 is `ca20943318755c037a9ac08faaeb3887ec06ae4ae27a3c7b2017e1cabfc3bbec`. The rebuilt
+extension passed all 12 fixed raw proposals and transition-verified six guarded actions. The fresh
+audit seed remains the predeclared `2026082299`.
+
+**Fresh audit result.** The selected soup ran exactly once on all 1,000 predeclared boards at root
+seed `2026082299` and scored **94.2% raw** (58 failures), split 96.8% Has-SET and 91.6% No-SET.
+Guarded accuracy was 99.0385% at 31.2% coverage. Parameter averaging is retained as a real paired
+development improvement, but it does not pass the fresh gate and the checkpoint is rejected as a
+complete policy. The evidence supports adding an explicit learned board-existence action head;
+`ACTIVE_V13_PROTOCOL.md` was locked before its all-board evidence stream.
+
+## 2026-08-20 — Active-v13 board-existence head
+
+The frozen 50/50 soup collected diagnostics from 1,024 fresh, balanced, in-memory browser renders
+at root seed `2026082301`; no bitmaps were persisted. Its unchanged raw zero-threshold action scored
+53 failures (**94.8242%**), split 95.7031% Has-SET and 93.9453% No-SET. The evidence contains the
+strongest score, runner-up margin, selected-card entropy and margin, and four statistics over all
+220 triple scores. Labels were attached only after frozen inference.
+
+The first fit exposed a protocol error before any candidate was deployed: because generation
+alternates board kind by iteration, the specified even/odd split contained 512 No-SET fitting
+boards and 512 Has-SET validation boards. Its nonsensical report and head are retained under
+`invalid-even-odd-*`. The protocol records the correction: within each board kind, records are
+ranked by a fixed hash of board seed and divided into equal 256-board fitting and validation halves.
+This assignment uses neither model output nor action correctness.
+
+On that corrected split, validation selected the predeclared L2=0.1 logistic head. It scored
+25/512 fitting failures (95.3125%; 95.3125% Has-SET, 94.9219% No-SET) and 22/512 validation
+failures (95.7031%; exactly 95.7031% for each board kind). This is only a development candidate;
+the locked, feedback-free 512-board browser comparison at root seed `2026082302` remains unopened
+at this entry.
+
+**Browser selection result.** On the identical 512 fresh browser boards, the unchanged raw
+zero-threshold head scored 26 failures (94.9219%), split 97.2656% Has-SET and 92.5781% No-SET. The
+fitted head scored 22 failures (**95.7031%**), split 96.8750% Has-SET and 94.5313% No-SET. It reduced
+total errors by four and improved No-SET by five boards while losing one Has-SET board, exactly the
+maximum conditional regression allowed by the locked rule. The fitted head is selected and the
+extension has been rebuilt with it. The one fresh audit at root seed `2026082399` remains unopened
+at this entry.
+
+**Fresh audit result.** The selected head passed the fixed 12-case extension smoke, then ran exactly
+once on all 1,000 predeclared boards at root seed `2026082399`. It scored **94.8% raw action
+accuracy** (52 failures), split 95.8% Has-SET and 93.8% No-SET. Guarded accuracy was 99.0196% at
+30.6% coverage and is not part of the raw claim. The 21 Has-SET and 31 No-SET failures spanned every
+capture profile and all four themes. The head balanced the action classes but did not lower the
+upstream visual/triple error floor, so it is rejected as a robustness solution. Its modest paired
+development improvement may remain deployed while the next upstream model experiment runs; this
+audit is exposed and retired.
+
+## 2026-08-20 — Active-v14 full browser-distribution training
+
+`ACTIVE_V14_PROTOCOL.md` locked this experiment before its training render. The browser renderer
+and streaming evaluator now share one deterministic fresh-case generator. A generic
+`RenderedBoardCollection` replaces the misleading Rust curriculum-only type name while preserving
+the separate historical failure-replay methods. Its new balanced sampler independently draws a
+board and triple for each batch slot; positive triples come from Has-SET boards and negative triples
+from either kind. Unit tests verify label balance, multiple-board sampling, exact tensor dimensions,
+and rejection when no positive source board exists.
+
+One Chrome process rendered all 2,048 balanced boards at root seed `2026082401` through the
+production React/SVG board and fanned the framed 30x21 RGB tensors directly into both MPSGraph
+trainers. No screenshot, generated card bitmap, or tensor corpus was persisted. Real two-board
+smokes completed an optimizer step through both MPSGraph and the FrankenTorch reference trainer.
+The fixed 10,000-step candidates completed in 59.231 seconds (`browser-r050`, SHA-256
+`ab6a673887f8cb1568d346930e029525b8a80e9cf4fd46baa05a2a63cce2e98f`) and 53.692 seconds
+(`browser-r100`, SHA-256 `332380e3b6e1e0d8169b3759a60222f8ccc9e65d4dff0324ab9f96f42281b42c`).
+
+Both checkpoints loaded strictly into the deployed FrankenTorch topology. On the exposed 4,096-board
+atlas diagnostic, `browser-r050` scored 96.3623% raw (149 failures; 97.2168% Has-SET, 95.5078%
+No-SET), while `browser-r100` scored 92.2363% (318; 96.1426% Has-SET, 88.3301% No-SET). The
+live-only result demonstrates loss of atlas coverage. Per protocol these are regression diagnostics,
+not selection results; both candidates and the fixed active-v12 soup reference advance to the
+paired 512-board raw browser seed `2026082402`, which remains unopened at this entry.
+
+**Browser selection result.** With a raw zero-threshold head on the identical 512 fresh browser
+boards, the active-v12 soup reference scored 26 failures (94.9219%; 97.2656% Has-SET, 92.5781%
+No-SET). `browser-r050` scored 25 (**95.1172%**; 96.8750% Has-SET, 93.3594% No-SET), gaining two
+No-SET boards while losing exactly one Has-SET board and therefore remaining eligible. The
+live-only `browser-r100` candidate was decisively worse at 42 failures (91.7969%; 96.4844% Has-SET,
+87.1094% No-SET). The 50/50 candidate wins the locked rule by one error, a weak development result.
+Its exact checkpoint is now embedded with the raw head. The fresh seed `2026082499` remains
+unopened at this entry.
+
+**Fresh audit result.** `browser-r050` passed the fixed extension smoke and then ran exactly once on
+all 1,000 predeclared boards at root seed `2026082499`. It scored **94.8% raw** (52 failures), split
+96.0% Has-SET and 93.6% No-SET. Guarded accuracy was 98.7302% at 31.5% coverage. It misses every raw
+gate and is rejected. Seventeen of the 52 failures used the crop profile, versus two to seven for
+each other profile; failures still covered all themes and every profile. Whole-batch live-domain
+mixing is falsified: the one-board selection gain did not replicate, while live-only training
+catastrophically forgot atlas coverage. The extension is restored to the active-v12 soup and
+active-v13 fitted action head while the next upstream experiment is designed. The reusable result
+is the deterministic, no-bitmap browser training stream—not either active-v14 checkpoint.
+
+## 2026-08-20 — Active-v15 neural-attribute relation readers
+
+The restored soup collected 1,024 balanced fresh browser records at root seed `2026082501`. WASM
+retained all 144 post-softmax card-attribute probabilities and 220 learned triple scores only after
+the frozen pixel forward pass; evidence mode then attached card IDs for scoring. No pixels were
+persisted, audit mode still rejects evidence, and the production extension does not request the
+arrays. The current fitted-head action scored 48 failures (95.3125%) over the full development
+stream.
+
+On the fixed hash-stratified split, current scored 25/512 fitting and 23/512 validation failures.
+Exact continuous same/different composition improved fitting to 21 but tied validation at 23. The
+25%-learned blend scored 20 fitting failures and also tied at 23 validation; the 50% and 75% blends
+scored 24 validation failures. Discrete attribute argmax scored 27 validation failures and was badly
+imbalanced (98.0469% Has-SET, 91.4063% No-SET). Per the locked simplicity tie-break, current remains
+selected, so no alternate reader is ported and no browser seed or audit is opened. This confirms
+that exact rule composition cannot recover information absent from the visual attributes.
+
+The same post-inference evidence localizes the live visual bottleneck over 12,288 card appearances:
+count 99.9430%, colour 99.7803%, **shape 98.4456%**, and fill 98.9176%. Crop is worst on both shape
+(98.0710%) and fill (98.3025%); shadow and tilt shape are each 98.0583%. Shape—not fill—is now the
+largest live-browser specialist error, unlike the earlier atlas-only diagnosis. The next model
+search should change shape learning or evidence preservation rather than add another board-level
+reader.
+
+## 2026-08-20 — Active-v16 shape-loss search
+
+`ACTIVE_V16_PROTOCOL.md` locked the hypothesis, candidates, seeds, and selection rule before any
+training or browser generation. The attribute objective now supports independent shape and fill
+multipliers while preserving its normalized scale; multiplier one is exactly the historical loss.
+Both FrankenTorch and MPSGraph expose the same shape control. At shape multiplier 2, a one-step
+parity probe produced loss `13.558712406` in FrankenTorch and `13.558712` in MPSGraph, with the
+first eight parameter gradients agreeing to approximately 1e-7.
+
+The two fixed 10,000-step MPSGraph trainings each completed in about 79.2 seconds. `shape-m2` has
+SHA-256 `43e3fd8b654bb4c7ca191ecbd8c076b0798d895b24552582541efcc4f36481fa`;
+`shape-m4` has SHA-256 `422657db2b593951f2602906493440433d93d946e785766c68cc37ef0131bc3c`.
+Both loaded strictly through the FrankenTorch evaluator. On the exposed 4,096-board atlas,
+`shape-m2` scored 96.8994% raw (97.3633% Has-SET, 96.4355% No-SET), 96.4172% triple accuracy,
+and 99.6674% attribute accuracy. `shape-m4` scored 97.0459% raw (97.7051% Has-SET, 96.3867%
+No-SET), 96.8140% triple accuracy, and 99.7152% attribute accuracy. Shape accuracy rose from the
+fixed control's 99.7620% to 99.8027% and 99.8067%, respectively, but its control board accuracy was
+slightly higher at 97.1436%. These atlas results are diagnostic only. The locked 512-board browser
+seed `2026082601` remains unopened at this entry.
+
+**Browser selection result.** On the identical 512 fresh browser boards with the raw zero-threshold
+action, the fixed control scored 28 failures (94.5313%), split 97.2656% Has-SET and 91.7969%
+No-SET. `shape-m2` scored 32 failures (93.7500%), split 96.0938% Has-SET and 91.4063% No-SET;
+`shape-m4` also scored 32 failures, split 95.7031% Has-SET and 91.7969% No-SET. Both candidates
+exceeded the permitted Has-SET regression and neither improved total failures, so the fixed control
+wins. Per protocol, no fresh audit is opened. The extension has been restored byte-for-byte to the
+active-v12 soup checkpoint and active-v13 fitted board head.
+
+The hypothesis is rejected as an end-to-end policy improvement: isolated shape classification did
+improve, but extra shape supervision perturbed triple calibration and reduced browser action
+accuracy. Future searches must optimize or preserve the action surface directly; per-attribute
+accuracy is a diagnostic, not a sufficient model-selection target.
+
+## 2026-08-20 — Active-v17 pixel-grid multiview inference
+
+`ACTIVE_V17_PROTOCOL.md` locked a sampling-phase hypothesis before implementation or evaluation.
+The candidate keeps the deployed soup checkpoint, learned topology, and fitted board head frozen.
+It interprets each fractional CSS card boundary four ways on the integer screenshot grid, applies
+the existing 30x21 area resampler to each, runs the same model four times, averages neural triple
+scores and attribute probabilities, and recomputes all board-head features. This is an honest
+same-model test-time view ensemble, not extra training, symbolic rule solving, or a learned-model
+ensemble. The historical crop is view one and remains the sole pixel buffer used by the temporal
+guard.
+
+Pure tests verify crop bounds, Rust-compatible triple order, evidence averaging, and recomputed
+diagnostics. A two-board real Chrome/WASM smoke at seed `2026082700` scored both board kinds
+correctly without persisting screenshots or tensors. The paired 512-board selection seed
+`2026082701` remains unopened at this entry.
+
+**Browser selection result.** With the frozen fitted head, baseline and four-view each scored
+exactly 21/512 failures (**95.8984%**), split 97.2656% Has-SET and 94.5313% No-SET. More strongly,
+the complete set of 21 failed iteration numbers was identical. Neural scores and uncertainty did
+move on many failures, so the views were not byte-identical, but no action crossed into correctness.
+Baseline wins the locked tie rule and the fresh audit remains unopened. Pixel-grid phase averaging
+at the already-compressed 30x21 input does not recover the missing evidence; the research path
+remains opt-in and production stays single-view.
+
+## 2026-08-20 — Active-v18 aligned shape-checkpoint soups
+
+`ACTIVE_V18_PROTOCOL.md` locked six strict parameter interpolations before construction. Each shape
+endpoint shares its initialization, base-data sequence, and optimizer schedule with the fixed v16
+control, so coordinate-wise interpolation is meaningful. Every generated checkpoint loaded through
+the canonical FrankenTorch evaluator and remains a single 55,155-parameter model.
+
+On the exposed 4,096-board atlas, shape-m2 primary weights 0.25/0.50/0.75 produced 125/157/145
+failures; shape-m4 weights 0.25/0.50/0.75 produced 136/143/118. The locked top two are `m4-w075`
+(97.1191%; 97.7539% Has-SET, 96.4844% No-SET; SHA-256
+`3cf309bf43064e200d382c521a3561e111ac651fe74297c5b0f9d50624fb4ec7`) and `m2-w025`
+(96.9482%; 97.3633% Has-SET, 96.5332% No-SET; SHA-256
+`c1e9595e45536a9584e00ad10299c6441e4e2b9bad95346d0d471c06143cb30e`). The former nearly
+recovers the control's 117 failures, but none beats it on this diagnostic. Per protocol both still
+advance against the stronger current deployment on browser seed `2026082801`, which remains
+unopened at this entry.
+
+**Browser selection result.** With the identical frozen active-v13 board head, the prior deployed
+checkpoint scored 30/512 failures (94.1406%; 94.5313% Has-SET, 93.7500% No-SET). `m4-w075`
+scored 20 (**96.0938%**; 95.3125% Has-SET, 96.8750% No-SET), while `m2-w025` scored 23
+(95.5078%; 95.3125% Has-SET, 95.7031% No-SET). Both soups improved both conditionals and were
+eligible; `m4-w075` wins by three boards. The extension now embeds its exact checkpoint hash
+`3cf309bf43064e200d382c521a3561e111ac651fe74297c5b0f9d50624fb4ec7` with the unchanged fitted
+head. The fresh audit seed `2026082899` remains unopened at this entry.
+
+**Integration-gate rejection.** Before opening that audit, the selected soup ran the fixed 12-case
+Chrome screenshot/click smoke. On the known clean classic 390x800 case it proposed card IDs
+55/36/19, which are not a SET; the other eleven raw proposals were valid and eight guarded actions
+transition-verified. A browser-development gain cannot override a deterministic clean-case action
+regression in the release gate. The soup is rejected for deployment, the active-v12 checkpoint and
+fitted active-v13 head are restored, and audit seed `2026082899` remains unopened. This is another
+warning that small fixed development comparisons can select brittle policies even when both class
+conditionals improve.
+
+## 2026-08-20 — Active-v19 large in-memory board-head data
+
+`ACTIVE_V19_PROTOCOL.md` locks a 16,384-board evidence stream and richer regularized head search.
+A new narrow Rust utility reads the existing versioned renderer stream, strict-loads the canonical
+deployed FrankenTorch policy, scores complete boards, and emits post-forward neural evidence. Its
+SET rule is used only to score the model's already-selected positions; it never selects a candidate.
+The rendered collection exposes read-only board views rather than leaking private training storage.
+
+All 28 `vision-data` tests (one benchmark ignored), the evaluator's two focused tests, compile-first
+check, formatting, and strict Clippy pass. A real two-board Chrome→binary pipe→FrankenTorch smoke at
+seed `2026082900` produced one Has-SET and one No-SET correct action, retained all 220 learned scores
+per board, and spent 18 ms in native inference. Pixels existed only in memory and the pipe; the only
+persistent smoke artifact is JSON neural evidence. The 16,384-board seed `2026082901` remains
+unopened at this entry.
+The initial large-run attempt exposed that `read_framed` buffered every board before inference,
+which would require roughly 3 GB for 16,384 boards. It was stopped before producing evidence and
+retained under `invalid-buffered-*`. A new `visit_framed` interface decodes and scores one board at
+a time; its focused test and strict Clippy pass. Persistent page reuse and a 5 ms readiness poll cut
+a 100-board benchmark from 21.0 to 10.9 seconds. Before opening the fixed seed, the protocol was
+amended to execute the exact sequence as four ordered, concurrent 4,096-board shards.
+
+All four shards completed in 467–473 seconds with exact global indices 0–16,383 and 4,096 evidence
+rows each. Raw zero-threshold accuracy was 94.5068% overall: shard accuracies were 94.5068%,
+93.8721%, 94.7998%, and 94.5068%. The model was consistently imbalanced toward Has-SET: shard
+Has-SET accuracies ranged from 96.3379% to 97.6074%, while No-SET ranged from 91.4063% to 92.5781%.
+
+On the fixed 8,192-board validation half, the deployed active-v13 head scored 362 failures
+(**95.5811%**), split 96.5088% Has-SET and 94.6533% No-SET. The richer L2=0.01 head was best at
+339 failures (**95.8618%**), split 96.3867% Has-SET and 95.3369% No-SET: it recovered 28 No-SET
+boards but lost five Has-SET boards. The locked eligibility tolerance was four Has-SET regressions,
+so it is ineligible by exactly one board. L2 0.1/1/10 scored 363/414/492 failures. The deployed head
+remains selected; browser seed `2026082902` and audit seed `2026082999` remain unopened. Large-data
+score-distribution modeling yields a real but small calibration improvement, still bounded by the
+upstream visual/triple errors.
+
+## 2026-08-20 — Active-v20 multi-board negative groups
+
+`ACTIVE_V20_PROTOCOL.md` locked a controlled attempt to retain No-SET board correlation without
+collapsing all negative training examples onto one board and one raster condition. The negative
+half of each batch was divided into either four groups of eight triples or eight groups of four;
+every group came from its own generated No-SET board and independently sampled atlas. The
+log-sum-exp false-positive loss was computed separately per group and averaged.
+
+The grouped sampler has focused layout and validation tests. Both native FrankenTorch and
+MPSGraph implement identical grouped objectives. A four-group one-step parity probe produced final
+loss `10.456101309` in FrankenTorch and `10.456100` in MPSGraph; the first eight shared-weight
+gradients agreed to approximately 1e-7. The fixed 10,000-step MPSGraph candidates trained in 78.6
+and 78.4 seconds. Their SHA-256 hashes are
+`42daf7e6be138aa662e4dfeaa70b8e54cbf3d9bc6e0e9d0e28e71a2280566a7d` (four groups) and
+`9324b8b2b075474ff64e53dcae51b6ba462113aa5161d39d192c25d1691f1dee` (eight groups).
+
+Both candidates failed the exposed 4,096-board atlas gate decisively. The fixed control scored 117
+failures (49 Has-SET, 68 No-SET) with 96.2524% triple accuracy. Four groups scored 302 failures
+(50 Has-SET, 252 No-SET) despite 97.6929% triple accuracy. Eight groups scored 248 failures (38
+Has-SET, 210 No-SET) despite 98.5046% triple accuracy. Neither browser selection nor audit seed was
+opened, and the active-v12 deployment remains untouched.
+
+This is a useful mechanistic rejection rather than a generic failure: shrinking each log-sum-exp
+from 32 terms to 8 or 4 lowers its logit scale by approximately `ln(groups)`. The grouped models
+learned markedly better local relations and preserved or improved Has-SET recognition, but the
+weaker aggregate pressure allowed many No-SET false positives. A follow-up must restore the missing
+log-count term before judging whether multi-board diversity itself helps.
+
+## 2026-08-20 — Active-v21 count-corrected negative groups
+
+`ACTIVE_V21_PROTOCOL.md` locked the unique `ln(group count)` correction implied by splitting the
+control's 32-term negative log-sum-exp into smaller aggregates. The sampler, topology, seeds,
+optimizer, and loss weight stayed fixed. A corrected four-group parity probe produced loss
+`13.494941940` in FrankenTorch and `13.494942` in MPSGraph, with the first eight shared gradients
+agreeing to approximately 1e-7. The 10,000-step four- and eight-group checkpoints trained in 84.8
+and 85.4 seconds with SHA-256
+`360a07306064ba9854ec23db301243f1c20e0813a802d87969af26e90f98a365` and
+`b70729a57bb424698784a017a5cc0405b292aa69a8588642d5cfb846dd30386e`.
+
+Both candidates again failed the exposed atlas gate. Four corrected groups scored 278 failures (46
+Has-SET, 232 No-SET) and 97.5525% triple accuracy. Eight corrected groups scored 254 failures (36
+Has-SET, 218 No-SET) and 98.2971% triple accuracy. The control remains 117 failures (49 Has-SET,
+68 No-SET). No browser or audit seed was opened and deployment remains untouched.
+
+The count correction does not rescue the distribution replacement. The grouped candidates retain
+their strong local relation and Has-SET behavior but see too few broad hard negatives. The next
+test should preserve the control's ordinary negative distribution and inject only a sparse number
+of correlated No-SET-board triples.
+
+## 2026-08-20 — Active-v22 sparse board-correlated injection
+
+`ACTIVE_V22_PROTOCOL.md` preserved the control's ordinary 32-negative distribution and replaced
+only four or eight negative positions with distinct triples from one generated No-SET board. The
+original single 32-term log-sum-exp and weight 2.5 remained unchanged. Focused tests prove that
+only the requested negative prefix is replaced and invalid counts are rejected. A four-injection
+one-step parity probe produced loss `13.637276577` in FrankenTorch and `13.637276` in MPSGraph,
+with the first eight shared gradients agreeing to approximately 1e-7.
+
+The 10,000-step count-4 and count-8 candidates each trained in 88.2 seconds, with SHA-256
+`6fe927db741cbedd645ce124aadc29adadf7f9add20156d36513283bf8d82e2c` and
+`30fe1363edd618945ed023cb3f65df1769afca6981f284dd79c7cc94a8f0da2d`. On the exposed
+4,096-board atlas, count-4 scored 156 failures (69 Has-SET, 87 No-SET), 96.1914% board accuracy,
+and 96.0754% triple accuracy. Count-8 scored 170 failures (66 Has-SET, 104 No-SET), 95.8496% board
+accuracy, and 95.9656% triple accuracy. Both trail the control's 117 failures (49 Has-SET, 68
+No-SET) and 96.2524% triple accuracy. Neither browser nor audit seed was opened; the active-v12
+deployment remains unchanged.
+
+Sparse correlation avoids the catastrophic No-SET collapse of full replacement, but even four
+injected samples perturb both conditionals enough to lose. The evidence across v20-v22 now rejects
+No-SET-board correlation as a productive sampler change under this fixed batch and objective. The
+next experiment should target the actual visual failure modes or increase hard-negative coverage
+without changing the proven marginal negative distribution.
+
+## 2026-08-20 — Active-v23 differentiable full-board fine-tuning
+
+`ACTIVE_V23_PROTOCOL.md` moved training onto the actual board action surface without changing the
+deployable topology. The policy encodes twelve cards once, differentiably gathers their learned
+probabilities into all 220 triples, and applies the existing typed relation and SET heads. A focused
+test proves that this path matches the existing inference scorer to 1e-10. Full-board backward
+passes have finite loss and shared gradients. Because random boards produced almost no action
+loss, the pre-run protocol amendment mines the hardest of eight generated boards while retaining
+an exactly alternating Has-SET/No-SET schedule.
+
+The native 1,000-step warm-started fine-tune completed in 70.1 seconds and saved locked snapshots.
+Step 250 has SHA-256 `ffd9bf6111251d9fe4b25bf2267d03955127fc2462eacdecf0515b07aa459fc3`;
+step 1,000 has SHA-256 `1ed84301a290639c9d215951bf768778962fd2a4ca0ec11b4f1d5368b114e923`.
+On the exposed 4,096-board atlas, step 250 scored 136 failures (77 Has-SET, 59 No-SET) and
+94.4580% triple accuracy. Step 1,000 scored 161 failures (90 Has-SET, 71 No-SET) and 94.0369%
+triple accuracy. The control remains 117 failures (49 Has-SET, 68 No-SET) and 96.2524% triple
+accuracy. No browser or audit seed was opened; deployment remains unchanged.
+
+The full-board loss genuinely reduced No-SET false positives at 250 steps, but supervising only
+the smooth extrema allowed the rest of the triple score surface to deteriorate and caused a larger
+Has-SET regression. Full-board ranking needs a balanced dense per-triple auxiliary objective, not
+more extremum-only steps.
+
+## 2026-08-20 — Active-v24 balanced dense board supervision
+
+`ACTIVE_V24_PROTOCOL.md` added a class-count-invariant dense SET-logit auxiliary to the v23 board
+loss. Has-SET boards give the mean valid-triple BCE and mean invalid-triple BCE equal weight;
+No-SET boards use mean invalid BCE. Focused arithmetic tests recover exactly `ln(2)` at zero logits
+for both board kinds and prove finite gradients with opposite signs for positive and negative
+actions.
+
+The 1,000-step run completed in 69.4 seconds. Step 250 has SHA-256
+`7a396994808abe1c31f7f8782419d73afba90c5bf38aeaa20a81d6b0077168cd`; step 1,000 has
+SHA-256 `68f462d37b088dd3ec0213470589cf0fbd2acb012c0cce8e90af14b701ffab7a`. On the exposed
+4,096-board atlas, step 250 scored 130 failures, exactly split 65 Has-SET and 65 No-SET, with
+95.4773% triple accuracy. Step 1,000 scored 180 failures (78 Has-SET, 102 No-SET) with 94.8608%
+triple accuracy. Neither clears the 117-failure control; no browser or audit seed was opened.
+
+Dense balancing recovers seven Has-SET failures relative to v23 step 250 and preserves the No-SET
+gain, but full-network updates still erode the already-strong visual representation. The next
+controlled test should freeze the card encoder and attribute specialists and adapt only the typed
+relation/SET decision head.
+
+## 2026-08-20 — Active-v25 decision-head-only board fine-tuning
+
+`ACTIVE_V25_PROTOCOL.md` kept the v24 balanced board and dense triple objectives but froze the
+shared visual encoder, all four attribute specialists, and the fill-texture branch. Only the eight
+typed relation/SET decision-head tensors were given to AdamW. A checkpoint-scope verifier proves
+that all 44 frozen tensors remain bit-identical while all eight permitted tensors change.
+
+The 1,000-step native run completed in 56.1 seconds. Step 250 has SHA-256
+`3965caae79c1d119b4264eb61330ff8ec31480deb210b6e32ef7a51fb7dae77a`; step 1,000 has
+SHA-256 `0584db5a9b5e1de2092e59fbd3a45825fb135f1443aba191b7133505b6a76749`.
+On the exposed 4,096-board atlas, step 250 narrowly cleared the predeclared eligibility gate with
+116 failures (53 Has-SET, 63 No-SET), versus the control's 117 (49 Has-SET, 68 No-SET). Step 1,000
+scored 121 failures (52 Has-SET, 69 No-SET) and was rejected before browser evaluation.
+
+The eligible step-250 checkpoint then faced the fixed deployed reference on the fresh paired
+512-board browser seed `2026090401`. The reference scored 27 failures, with 95.3125% Has-SET and
+94.1406% No-SET accuracy. Step 250 scored 32 failures, with 92.5781% Has-SET and 94.9219% No-SET
+accuracy. It improved No-SET by two cases but lost seven Has-SET cases, failing both the total-error
+and conditional-regression gates. The selector restored the active-v12 checkpoint and frozen
+active-v13 board head. The audit seed `2026090499` was not opened.
+
+Balanced dense supervision therefore addresses class-frequency imbalance but not the harder
+failure-cost asymmetry: a small downward score shift helps negative boards while turning too many
+positive boards into false `No SET` decisions. The next experiment should keep the visual encoder
+frozen and train/calibrate an explicitly board-conditional decision layer with a constrained
+Has-SET recall objective, rather than continuing unconstrained relation-head fine-tuning.
+
+## 2026-08-21 — Active-v26 recall-constrained board-head calibration
+
+`ACTIVE_V26_PROTOCOL.md` reused the already-exposed 16,384-board active-v19 neural evidence rather
+than generating another fitting corpus. The richer L2=0.01 score-distribution head was fit on the
+original first 8,192 rows, then its operating threshold was selected under a hard fitting
+constraint: neither Has-SET nor No-SET failures could exceed the deployed active-v13 head. The
+extension implementation consumes only the frozen FrankenTorch policy's 220 learned triple scores;
+an exact runtime replay reproduces all fitting and validation decisions from the offline fitter.
+
+On fitting data, the constrained head reduced failures from 413 to 379 (162 Has-SET, 217 No-SET)
+versus the deployed head's 163/250 split. On the fixed 8,192-board validation half it reduced
+failures from 362 to 343: 145 Has-SET and 198 No-SET versus 143/219. That 19-board net gain and
+two-board Has-SET regression cleared the predeclared development tolerance. The serialized
+candidate has SHA-256 `4ee99dc8d0026a64fbe4431bc46f0677a14aca54f39e472d4b1dff1518af3eb4`.
+
+On the fresh paired 512-board browser seed `2026090501`, the active-v13 reference scored 21
+failures (95.7031% Has-SET, 96.0938% No-SET). The recall-constrained head scored 20 failures with
+identical 95.7031% Has-SET accuracy and 96.4844% No-SET accuracy. It therefore won the locked rule
+by one No-SET board and passed the fixed integration smoke: 12/12 valid proposals and all six
+guarded clicks transition-verified.
+
+The one predeclared audit at seed `2026090599` rejected the candidate as a robustness solution. It
+scored 95.7% raw accuracy with 43 failures, split 95.6% Has-SET (22 failures) and 95.8% No-SET (21
+failures). Guarded accuracy was 99.0228% at 30.7% coverage. Of the Has-SET failures, ten were false
+`No SET` decisions and twelve selected an invalid strongest triple. Failures covered every capture
+profile; crop, gamut, and shadow were again largest. The active-v12 checkpoint and active-v13 head
+were restored byte-for-byte.
+
+The constrained head is a genuine and well-balanced calibration improvement, but its fresh gain is
+far smaller than the remaining perception floor. Further board-head complexity is now deprioritized.
+The next active-learning experiment should feed these retired audit failures back into a targeted
+browser-rendered curriculum while updating the weak visual specialists and decision head without
+moving the shared encoder or the already-strong count/colour specialists.
+
+## 2026-08-21 — Active-v27 targeted browser-curriculum adaptation
+
+`ACTIVE_V27_PROTOCOL.md` fed all 43 retired v26 audit failures back into training as active
+curriculum. Each failure produced one exact replay and three deterministic local/new-board
+appearances, mixed with 852 fresh boards for 1,024 total. Chrome rendered the production UI and
+streamed framed 30x21 card tensors directly into FrankenTorch; no screenshots, bitmaps, or tensor
+corpus were persisted. The complete render plus 1,000 native steps used the active-v12 warm start,
+hardest-of-eight full-board mining, and the balanced v24 objective.
+
+Only shape, fill, the fill-texture branch, and the typed relation/SET heads trained. Scope checks
+prove all 34 permitted tensors changed and all 18 shared/count/colour tensors stayed bit-identical.
+Training completed in 65.5 seconds. Step 250 has SHA-256
+`77b46b40b9ae5fd4cd12606e6b78652199a5415bf9628b9e95169f13810bbf8f`; step 1,000 has
+SHA-256 `439c1eedb7f36029358393dfba74d08d41f281dfacec92456446332223d8edbc`.
+
+Against active-v12's exposed-atlas result of 98 failures (41 Has-SET, 57 No-SET), step 250 scored
+97 (37/60) and cleared the locked gate. Step 1,000 overfit to 103 (59/44) and was rejected. The
+first reference-only browser attempt later exposed a harness lifetime defect: after iteration 458,
+Chrome left a screenshot promise unresolved and Node reported an unsettled top-level await. No
+candidate ran. The partial log is preserved as invalid; a bounded capture promise and two ordered
+fresh-browser shards reproduce identical predictions without the long-session stall.
+
+On the complete 512-board seed `2026090602`, active-v12 scored 30 failures (9 Has-SET, 21 No-SET).
+Step 250 scored 28 (11 Has-SET, 17 No-SET). Active curriculum therefore transferred a real four-case
+No-SET gain, but added two Has-SET failures—one beyond the locked tolerance. It was rejected and no
+audit seed was opened. This is evidence for targeted adaptation, but the update strength remains
+too asymmetric for direct deployment.
+
+## 2026-08-21 — Active-v28 partial active-curriculum adaptation
+
+`ACTIVE_V28_PROTOCOL.md` interpolated the aligned v27 step-250 update with its exact active-v12
+parent at fixed v27 weights 0.25/0.50/0.75. Frozen tensors remain unchanged under interpolation,
+and strict scope checks constrain every difference to the same 34 permitted tensors. On the exposed
+atlas, weights 0.25/0.50/0.75 scored 101/97/96 failures. The selected 0.75 blend scored 37 Has-SET
+and 59 No-SET failures with SHA-256
+`0dad6fce0bf195a4ff752d5b9a36add8452aaeca95d03a6478c585736e41ed96`.
+
+On fresh paired browser seed `2026090701`, active-v12 scored 30 failures (11 Has-SET, 19 No-SET).
+The 0.75 blend scored 26 and improved both conditionals: 8 Has-SET and 18 No-SET failures. It passed
+the fixed 12-case integration smoke with all proposals valid and all six guarded clicks
+transition-verified.
+
+The one fixed 1,000-board audit at seed `2026090799` rejected the blend. Across four ordered
+fresh-browser process shards it scored 95.8% raw accuracy with 42 failures, split 96.2% Has-SET (19)
+and 95.4% No-SET (23). Guarded accuracy was 98.9726% at 29.2% coverage. The script restored the
+active-v12 checkpoint and active-v13 head byte-for-byte.
+
+Active curriculum plus partial interpolation is the strongest upstream development result in this
+sequence and can improve both classes, but the effect is not stable enough to approach 98% raw on
+unseen browser conditions. The next research step should stop tuning a single fixed mixture on
+small paired sets and instead enlarge the independent generative validation budget or train a
+representation with enough capacity/resolution to reduce the persistent shape/fill error floor.
+
+## 2026-08-21 — Active-v29 doubled-resolution representation test
+
+`ACTIVE_V29_PROTOCOL.md` locks a direct test of whether the `30x21` card tensor discards shape and
+fill evidence before the learned policy can use it. The `60x42` candidate keeps the honest shared
+convolution, four attribute specialists, fill-texture residual, typed relations, and learned SET
+head. One additional learned stride-2 convolution in each specialist and texture path restores the
+same `8x6` projection maps. The resulting topology has 58,075 parameters versus the deployed
+55,155; it is a resolution/local-processing experiment, not a scaling-law claim.
+
+Both dimensions are compile-time Rust features of the same contract, data loader, policy, MPSGraph
+trainer, and WASM runtime. The deployed `30x21` path remains the default, incompatible checkpoints
+strict-load fail, and the browser reads its dimensions from WASM. The renderer stream now accepts
+explicit model dimensions so `60x42` browser tensors remain in memory and are never persisted.
+
+The mandatory one-step fixed-batch parity gate passed before full training: MPSGraph loss
+`14.509955` versus FrankenTorch `14.509956457`, with the first eight shared gradients agreeing
+within `2.5e-8`. The initial diagnostic mismatch was a parity-harness error: only
+`--validation-atlas-dir` was passed to the native probe, while probe mode reads `--atlas-dir`.
+Passing the identical v8 training corpus to both implementations removed the discrepancy. No v29
+training or evaluation seed was opened before this correction.
+
+The fresh training corpus contains 1,408 atlases with SHA-256 corpus hash
+`5a96f77dc9a42a06558edbbe4f527bc37d13b3cfd3b69a2396f8b2109560cc2d`; the disjoint 704-atlas
+eligibility corpus has hash `ef52f067cadfbb15519b92189d3a776ba0087b831ddc5e6e1c13b7f698b79661`.
+All eight matched replicas completed the locked 20,000-step schedule with exactly one positive and
+one negative browser-rendered replacement per 64-example batch. The four `30x21` runs took
+136.124, 136.124, 128.908, and 125.722 optimizer-seconds. The four `60x42` runs took 440.709,
+423.606, 432.696, and 428.602 seconds: about 3.3 times the optimizer cost for four times the input
+pixels. The 173,680-parameter low-resolution wide control took 122.998 seconds.
+
+On the locked 4,096-board atlas eligibility set, the `30x21` uniform ensemble scored 11 failures
+(10 Has-SET, 1 No-SET). The `60x42` uniform ensemble scored one failure (1 Has-SET, 0 No-SET),
+99.7314% triple accuracy, and 99.9985% attribute accuracy. It therefore advanced. Individual
+high-resolution replicas scored 8, 4, 17, and 14 failures, demonstrating material seed variance;
+the uniform ensemble was not replaced with a post-selected subset. The wide low-resolution control
+scored 86 failures and did not support a parameter-count explanation.
+
+The paired 2,048-board production-browser result rejected the candidate decisively. The matched
+`30x21` ensemble scored 97.6562% raw accuracy with 48 failures (36 Has-SET, 12 No-SET). The
+`60x42` ensemble scored only 85.1074% with 305 failures, all false `No SET` actions on Has-SET
+boards. The paired difference was -257 cases with bootstrap standard error 15.762. Live shape
+accuracy was 98.4823%, below the locked 99.5% gate; fill improved to 99.6134%. No audit seed was
+opened.
+
+Completed neural evidence localizes most of the raw-action collapse to distribution shift through
+the frozen active-v13 logistic board head rather than failure to identify a visual triple. On the
+1,024 Has-SET boards, the high-resolution ensemble's strongest triple was valid 1,010 times and its
+native zero-score action would have been correct 1,007 times, but the frozen head accepted only 722
+boards and produced 719 correct actions. The old head's mean-score feature moved from -17.63 to
+-22.83; its standardized weighted contribution fell from -0.38 to -5.09, overwhelming the
+candidate's higher best score. This post-rejection diagnostic does not rescue the candidate: a
+zero-score action was not the predeclared browser policy, the paired gain would be small, and the
+shape gate still fails. The active-v12 checkpoint and active-v13 head were restored byte-for-byte.
+
+The experiment therefore falsifies the simple claim that doubling the card tensor plus uniform
+ensembling solves the live perception floor. It greatly improves the synthetic atlas and fill
+classification, but barely changes live strongest-triple correctness (1,010 versus 1,009 Has-SET
+boards for the matched control), does not fix live shape, and changes score-distribution geometry
+enough to invalidate the inherited board head. Any follow-up must treat board-existence calibration
+as topology-specific and must first produce a real live shape improvement on a development stream;
+recalibrating this rejected model alone would be another board-head experiment, not evidence for
+the resolution hypothesis.

@@ -12,8 +12,13 @@ device_scales_arg=${7:-1}
 chrome_bin='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 preview_log=$(mktemp /tmp/set-vision-preview.XXXXXX)
 preview_port=${VISION_PREVIEW_PORT:-4173}
+render_jobs=${VISION_RENDER_JOBS:-4}
 if [[ ! "$preview_port" =~ ^[0-9]+$ ]] || ((preview_port < 1024 || preview_port > 65535)); then
   echo 'VISION_PREVIEW_PORT must be an integer from 1024 through 65535' >&2
+  exit 2
+fi
+if [[ ! "$render_jobs" =~ ^[0-9]+$ ]] || ((render_jobs < 1 || render_jobs > 32)); then
+  echo 'VISION_RENDER_JOBS must be an integer from 1 through 32' >&2
   exit 2
 fi
 
@@ -91,35 +96,43 @@ render_atlas() {
   if [[ "$capture_profile" != jpeg && -s "$output_dir/$output_name.png" ]]; then
     return 0
   fi
-  profile=$(mktemp -d /tmp/set-vision-chrome.XXXXXX)
-  local status=0
-  timeout --kill-after=1 8 "$chrome_bin" \
-    --headless=new \
-    --disable-gpu \
-    --hide-scrollbars \
-    --force-device-scale-factor="$device_scale" \
-    --window-size="$window_width,$window_height" \
-    --user-data-dir="$profile" \
-    --screenshot="$output_dir/$output_name.png" \
-    "http://127.0.0.1:$preview_port/?vision-atlas=$theme&vision-seed=$seed&vision-card-width=$card_width&vision-capture=$capture_profile" \
-    >/dev/null 2>/dev/null || status=$?
-  trash "$profile"
-  if ((status != 0 && status != 124 && status != 137)); then
-    return "$status"
-  fi
-  test -s "$output_dir/$output_name.png"
-  if [[ "$capture_profile" == jpeg ]]; then
-    local conversion_dir
-    local jpeg_file
-    local decoded_file
-    conversion_dir=$(mktemp -d /tmp/set-vision-convert.XXXXXX)
-    jpeg_file="$conversion_dir/frame.jpg"
-    decoded_file="$conversion_dir/frame.png"
-    sips -s format jpeg -s formatOptions 52 "$output_dir/$output_name.png" --out "$jpeg_file" >/dev/null
-    sips -s format png "$jpeg_file" --out "$decoded_file" >/dev/null
-    mv "$decoded_file" "$output_dir/$output_name.png"
-    trash "$conversion_dir"
-  fi
+  local attempt
+  local status
+  for ((attempt = 1; attempt <= 3; attempt++)); do
+    profile=$(mktemp -d /tmp/set-vision-chrome.XXXXXX)
+    local screenshot="$profile/frame.png"
+    status=0
+    timeout --kill-after=1 8 "$chrome_bin" \
+      --headless=new \
+      --disable-gpu \
+      --hide-scrollbars \
+      --force-device-scale-factor="$device_scale" \
+      --window-size="$window_width,$window_height" \
+      --user-data-dir="$profile" \
+      --screenshot="$screenshot" \
+      "http://127.0.0.1:$preview_port/?vision-atlas=$theme&vision-seed=$seed&vision-card-width=$card_width&vision-capture=$capture_profile" \
+      >/dev/null 2>/dev/null || status=$?
+    if [[ -s "$screenshot" ]]; then
+      if [[ "$capture_profile" == jpeg ]]; then
+        local jpeg_file="$profile/frame.jpg"
+        local decoded_file="$profile/decoded.png"
+        sips -s format jpeg -s formatOptions 52 "$screenshot" --out "$jpeg_file" >/dev/null
+        sips -s format png "$jpeg_file" --out "$decoded_file" >/dev/null
+        mv "$decoded_file" "$output_dir/$output_name.png"
+      else
+        mv "$screenshot" "$output_dir/$output_name.png"
+      fi
+    fi
+    trash "$profile"
+    if [[ -s "$output_dir/$output_name.png" ]]; then
+      return 0
+    fi
+    if ((status != 0 && status != 124 && status != 137)); then
+      return "$status"
+    fi
+  done
+  echo "failed to render $output_name after 3 attempts" >&2
+  return 1
 }
 
 seed_end=$((seed_start + seed_count - 1))
@@ -145,7 +158,7 @@ for device_scale in "${device_scales[@]}"; do
           render_atlas "$theme" "$seed" &
           pids+=("$!")
           pending=$((pending + 1))
-          if ((pending >= 4)); then
+          if ((pending >= render_jobs)); then
             wait_for_batch
           fi
         done

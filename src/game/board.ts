@@ -113,6 +113,24 @@ export function generateModeB(rng: RNG): Board {
 }
 
 /**
+ * Generate a twelve-card board with no valid SET.
+ *
+ * This is intentionally separate from the player-facing modes, which always
+ * contain at least one answer. Vision-policy evaluation needs both sides of
+ * its raw action space (`Set(...)` and `NoSet`) without embedding a fixed
+ * corpus in the browser harness.
+ */
+export function generateNoSetBoard(rng: RNG): Board {
+  for (let attempts = 1; attempts <= MAX_ATTEMPTS; attempts++) {
+    const cards = deal(rng)
+    if (countSets(cards) === 0) {
+      return { mode: 'B', cards, sets: [], attempts }
+    }
+  }
+  throw new Error(`generateNoSetBoard: no setless board within ${MAX_ATTEMPTS} attempts`)
+}
+
+/**
  * Mode A — exactly six sets. Rejection sampling: reshuffle and re-count until a
  * deal has exactly six sets. A random 12-card board averages ~2.78 sets, so six
  * is above the mean but common enough to hit within tens of attempts. The

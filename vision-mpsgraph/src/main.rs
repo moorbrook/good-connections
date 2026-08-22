@@ -17,7 +17,7 @@ use objc2_metal_performance_shaders_graph::{MPSGraph, MPSGraphDevice, MPSGraphTe
 use set_vision_contract::{
     ATTRIBUTE_COUNT, ATTRIBUTE_VALUE_COUNT, CARD_HEIGHT, CARD_WIDTH, CHANNELS, RELATION_CLASS_COUNT,
 };
-use set_vision_data::{AtlasCollection, Batch, Rng};
+use set_vision_data::{AtlasCollection, Batch, CURRICULUM_RNG_SALT, RenderedBoardCollection, Rng};
 
 const DEFAULT_STEPS: usize = 100;
 const DEFAULT_DATA_SEED: u64 = 99_005;
@@ -35,9 +35,19 @@ struct TrainConfig {
     init_seed: u64,
     typed_relations: bool,
     fill_loss_multiplier: f32,
+    shape_loss_multiplier: f32,
     negative_logsumexp_loss_weight: f32,
     board_correlated_negatives: bool,
+    negative_board_groups: usize,
+    negative_group_count_correction: bool,
+    board_correlated_negative_count: usize,
     wide_vision: bool,
+    curriculum_stdin: bool,
+    curriculum_rate: f64,
+    curriculum_examples_per_label: usize,
+    targeted_curriculum: bool,
+    browser_training_stdin: bool,
+    browser_batch_rate: f64,
 }
 
 struct PreparedBatch {
@@ -299,9 +309,19 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
         init_seed: DEFAULT_INIT_SEED,
         typed_relations: true,
         fill_loss_multiplier: 1.0,
+        shape_loss_multiplier: 1.0,
         negative_logsumexp_loss_weight: 0.0,
         board_correlated_negatives: false,
+        negative_board_groups: 1,
+        negative_group_count_correction: false,
+        board_correlated_negative_count: 0,
         wide_vision: false,
+        curriculum_stdin: false,
+        curriculum_rate: 0.25,
+        curriculum_examples_per_label: usize::MAX,
+        targeted_curriculum: false,
+        browser_training_stdin: false,
+        browser_batch_rate: 0.5,
     };
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -331,8 +351,50 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
                     .ok_or("--fill-loss-multiplier requires a value")?
                     .parse::<f32>()?;
             }
+            "--shape-loss-multiplier" => {
+                config.shape_loss_multiplier = arguments
+                    .next()
+                    .ok_or("--shape-loss-multiplier requires a value")?
+                    .parse::<f32>()?;
+            }
             "--board-correlated-negatives" => config.board_correlated_negatives = true,
+            "--negative-board-groups" => {
+                config.negative_board_groups = arguments
+                    .next()
+                    .ok_or("--negative-board-groups requires a value")?
+                    .parse::<usize>()?;
+            }
+            "--negative-group-count-correction" => {
+                config.negative_group_count_correction = true;
+            }
+            "--board-correlated-negative-count" => {
+                config.board_correlated_negative_count = arguments
+                    .next()
+                    .ok_or("--board-correlated-negative-count requires a value")?
+                    .parse::<usize>()?;
+            }
             "--wide-vision" => config.wide_vision = true,
+            "--curriculum-stdin" => config.curriculum_stdin = true,
+            "--curriculum-rate" => {
+                config.curriculum_rate = arguments
+                    .next()
+                    .ok_or("--curriculum-rate requires a value")?
+                    .parse::<f64>()?;
+            }
+            "--curriculum-examples-per-label" => {
+                config.curriculum_examples_per_label = arguments
+                    .next()
+                    .ok_or("--curriculum-examples-per-label requires a value")?
+                    .parse::<usize>()?;
+            }
+            "--targeted-curriculum" => config.targeted_curriculum = true,
+            "--browser-training-stdin" => config.browser_training_stdin = true,
+            "--browser-batch-rate" => {
+                config.browser_batch_rate = arguments
+                    .next()
+                    .ok_or("--browser-batch-rate requires a value")?
+                    .parse::<f64>()?;
+            }
             "--negative-logsumexp-loss-weight" => {
                 config.negative_logsumexp_loss_weight = arguments
                     .next()
@@ -353,7 +415,7 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
             }
             unknown => {
                 return Err(format!(
-                    "unknown argument {unknown}; usage: [--steps N] [--output PATH] [--atlas-dir PATH] [--no-augment] [--legacy-untyped] [--fill-loss-multiplier M] [--negative-logsumexp-loss-weight W] [--board-correlated-negatives] [--wide-vision] [--data-seed N] [--init-seed N]"
+                    "unknown argument {unknown}; usage: [--steps N] [--output PATH] [--atlas-dir PATH] [--no-augment] [--legacy-untyped] [--shape-loss-multiplier M] [--fill-loss-multiplier M] [--negative-logsumexp-loss-weight W] [--board-correlated-negatives] [--negative-board-groups N] [--negative-group-count-correction] [--board-correlated-negative-count N] [--wide-vision] [--curriculum-stdin] [--curriculum-rate 0..1] [--curriculum-examples-per-label N] [--targeted-curriculum] [--browser-training-stdin] [--browser-batch-rate 0..1] [--data-seed N] [--init-seed N]"
                 )
                 .into());
             }
@@ -364,6 +426,9 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
     }
     if !config.fill_loss_multiplier.is_finite() || config.fill_loss_multiplier <= 0.0 {
         return Err("fill-loss multiplier must be finite and positive".into());
+    }
+    if !config.shape_loss_multiplier.is_finite() || config.shape_loss_multiplier <= 0.0 {
+        return Err("shape-loss multiplier must be finite and positive".into());
     }
     if !config.negative_logsumexp_loss_weight.is_finite()
         || config.negative_logsumexp_loss_weight < 0.0
@@ -378,8 +443,64 @@ fn parse_config() -> Result<TrainConfig, Box<dyn Error>> {
             "--board-correlated-negatives requires --negative-logsumexp-loss-weight".into(),
         );
     }
+    if config.negative_board_groups == 0
+        || !(policy_graph::BATCH_SIZE / 2).is_multiple_of(config.negative_board_groups)
+    {
+        return Err("negative-board-groups must be positive and divide half the batch size".into());
+    }
+    if config.negative_board_groups != 1 && !config.board_correlated_negatives {
+        return Err(
+            "--negative-board-groups greater than one requires --board-correlated-negatives".into(),
+        );
+    }
+    if config.negative_group_count_correction && config.negative_board_groups == 1 {
+        return Err(
+            "--negative-group-count-correction requires multiple negative board groups".into(),
+        );
+    }
+    if config.board_correlated_negative_count > 0 {
+        if config.negative_logsumexp_loss_weight == 0.0 {
+            return Err(
+                "--board-correlated-negative-count requires --negative-logsumexp-loss-weight"
+                    .into(),
+            );
+        }
+        if config.board_correlated_negative_count > policy_graph::BATCH_SIZE / 2 {
+            return Err("--board-correlated-negative-count must fit within half the batch".into());
+        }
+        if config.board_correlated_negatives || config.negative_board_groups != 1 {
+            return Err(
+                "--board-correlated-negative-count cannot be combined with grouped board negatives"
+                    .into(),
+            );
+        }
+    }
     if config.wide_vision && !config.typed_relations {
         return Err("--wide-vision requires --typed-relations".into());
+    }
+    if !config.curriculum_rate.is_finite()
+        || config.curriculum_rate < 0.0
+        || config.curriculum_rate > 1.0
+    {
+        return Err("--curriculum-rate must be finite and between zero and one".into());
+    }
+    if config.curriculum_rate > 0.0 && !config.curriculum_stdin {
+        config.curriculum_rate = 0.0;
+    }
+    if config.curriculum_examples_per_label == 0 {
+        return Err("--curriculum-examples-per-label must be positive".into());
+    }
+    if config.targeted_curriculum && !config.curriculum_stdin {
+        return Err("--targeted-curriculum requires --curriculum-stdin".into());
+    }
+    if !config.browser_batch_rate.is_finite()
+        || config.browser_batch_rate < 0.0
+        || config.browser_batch_rate > 1.0
+    {
+        return Err("--browser-batch-rate must be finite and between zero and one".into());
+    }
+    if config.browser_training_stdin && config.curriculum_stdin {
+        return Err("--browser-training-stdin cannot be combined with --curriculum-stdin".into());
     }
     Ok(config)
 }
@@ -508,12 +629,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut policy = policy_graph::PolicyGraph::new(
         config.init_seed,
         config.typed_relations,
-        config.negative_logsumexp_loss_weight,
+        policy_graph::NegativeAggregateConfig {
+            weight: config.negative_logsumexp_loss_weight,
+            board_groups: config.negative_board_groups,
+            count_correction: config.negative_group_count_correction,
+        },
         config.wide_vision,
+        config.shape_loss_multiplier,
         config.fill_loss_multiplier,
     );
     println!("typed_relations: {}", config.typed_relations);
     println!("fill_loss_multiplier: {}", config.fill_loss_multiplier);
+    println!("shape_loss_multiplier: {}", config.shape_loss_multiplier);
     println!(
         "negative_logsumexp_loss_weight: {}",
         config.negative_logsumexp_loss_weight
@@ -522,7 +649,32 @@ fn main() -> Result<(), Box<dyn Error>> {
         "board_correlated_negatives: {}",
         config.board_correlated_negatives
     );
+    println!("negative_board_groups: {}", config.negative_board_groups);
+    println!(
+        "negative_group_count_correction: {}",
+        config.negative_group_count_correction
+    );
+    println!(
+        "board_correlated_negative_count: {}",
+        config.board_correlated_negative_count
+    );
     println!("wide_vision: {}", config.wide_vision);
+    println!("curriculum_rate: {}", config.curriculum_rate);
+    println!(
+        "curriculum_examples_per_label: {}",
+        config
+            .curriculum_examples_per_label
+            .min(policy_graph::BATCH_SIZE / 2)
+    );
+    println!("targeted_curriculum: {}", config.targeted_curriculum);
+    println!(
+        "browser_batch_rate: {}",
+        if config.browser_training_stdin {
+            config.browser_batch_rate
+        } else {
+            0.0
+        }
+    );
     let parameter_count = policy
         .parameters
         .iter()
@@ -536,10 +688,31 @@ fn main() -> Result<(), Box<dyn Error>> {
     let atlas_dir = config
         .atlas_dir
         .unwrap_or_else(|| repository.join("vision-artifacts/atlases"));
+    let rendered_boards = if config.curriculum_stdin || config.browser_training_stdin {
+        let collection = RenderedBoardCollection::read_framed(std::io::stdin().lock())?;
+        println!("rendered_board_samples: {}", collection.len());
+        Some(collection)
+    } else {
+        println!("rendered_board_samples: 0");
+        None
+    };
     let atlases = AtlasCollection::load(&atlas_dir)?;
     let mut rng = Rng::new(config.data_seed);
-    let probe_batch = if config.board_correlated_negatives {
-        atlases.make_board_correlated_training_batch(&mut rng, policy_graph::BATCH_SIZE, false)
+    let mut curriculum_rng = Rng::new(config.data_seed ^ CURRICULUM_RNG_SALT);
+    let probe_batch = if config.board_correlated_negative_count > 0 {
+        atlases.make_sparse_board_correlated_training_batch(
+            &mut rng,
+            policy_graph::BATCH_SIZE,
+            false,
+            config.board_correlated_negative_count,
+        )?
+    } else if config.board_correlated_negatives {
+        atlases.make_multi_board_correlated_training_batch(
+            &mut rng,
+            policy_graph::BATCH_SIZE,
+            false,
+            config.negative_board_groups,
+        )?
     } else if config.negative_logsumexp_loss_weight > 0.0 {
         atlases.make_grouped_training_batch(&mut rng, policy_graph::BATCH_SIZE, false)
     } else {
@@ -565,16 +738,54 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     for step in 1..=steps {
         let started = Instant::now();
-        let training_batch = if config.board_correlated_negatives {
-            atlases.make_board_correlated_training_batch(
+        let use_browser_batch =
+            config.browser_training_stdin && curriculum_rng.chance(config.browser_batch_rate);
+        let base_batch = if use_browser_batch {
+            rendered_boards
+                .as_ref()
+                .ok_or("missing rendered browser boards")?
+                .make_balanced_training_batch(&mut curriculum_rng, policy_graph::BATCH_SIZE)?
+        } else if config.board_correlated_negative_count > 0 {
+            atlases.make_sparse_board_correlated_training_batch(
                 &mut rng,
                 policy_graph::BATCH_SIZE,
                 config.augment,
-            )
+                config.board_correlated_negative_count,
+            )?
+        } else if config.board_correlated_negatives {
+            atlases.make_multi_board_correlated_training_batch(
+                &mut rng,
+                policy_graph::BATCH_SIZE,
+                config.augment,
+                config.negative_board_groups,
+            )?
         } else if config.negative_logsumexp_loss_weight > 0.0 {
             atlases.make_grouped_training_batch(&mut rng, policy_graph::BATCH_SIZE, config.augment)
         } else {
             atlases.make_training_batch(&mut rng, policy_graph::BATCH_SIZE, config.augment)
+        };
+        let use_curriculum = config.curriculum_stdin
+            && rendered_boards
+                .as_ref()
+                .is_some_and(|_| curriculum_rng.chance(config.curriculum_rate));
+        let training_batch = if use_curriculum {
+            if config.targeted_curriculum {
+                atlases.mix_targeted_curriculum_training_batch(
+                    rendered_boards.as_ref().ok_or("missing curriculum")?,
+                    &mut curriculum_rng,
+                    base_batch,
+                    config.curriculum_examples_per_label,
+                )
+            } else {
+                atlases.mix_curriculum_training_batch(
+                    rendered_boards.as_ref().ok_or("missing curriculum")?,
+                    &mut curriculum_rng,
+                    base_batch,
+                    config.curriculum_examples_per_label,
+                )
+            }
+        } else {
+            base_batch
         };
         let batch = prepare_batch(&training_batch);
         let (loss, gradients) = autoreleasepool(|_| run_policy(&policy, &device, &batch))?;

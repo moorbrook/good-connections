@@ -189,6 +189,8 @@ struct ResearchAttributeHead<
 > {
     local_convolution: Conv2d,
     dilated_residual_convolution: Conv2d,
+    #[cfg(feature = "high-resolution")]
+    resolution_downsample_convolution: Conv2d,
     projection: Linear,
     classifier: Linear,
 }
@@ -217,6 +219,16 @@ impl<const SHARED_CHANNELS: usize, const HEAD_CHANNELS: usize, const EMBED_DIM: 
                 true,
             )?
             .dilation((2, 2)),
+            #[cfg(feature = "high-resolution")]
+            resolution_downsample_convolution: Conv2d::new(
+                session,
+                HEAD_CHANNELS,
+                HEAD_CHANNELS,
+                (3, 3),
+                (2, 2),
+                (1, 1),
+                true,
+            )?,
             projection: Linear::new(
                 session,
                 HEAD_CHANNELS * CONV_OUTPUT_HEIGHT * CONV_OUTPUT_WIDTH,
@@ -255,6 +267,12 @@ impl<const SHARED_CHANNELS: usize, const HEAD_CHANNELS: usize, const EMBED_DIM: 
         let local = self.local_convolution.forward(session, input)?;
         let residual = self.dilated_residual_convolution.forward(session, local)?;
         let encoded = session.tensor_add(local, residual)?;
+        #[cfg(feature = "high-resolution")]
+        let encoded = {
+            let encoded = session.tensor_gelu(encoded)?;
+            self.resolution_downsample_convolution
+                .forward(session, encoded)?
+        };
         finish_attribute_head(
             session,
             encoded,
@@ -273,15 +291,23 @@ impl<const SHARED_CHANNELS: usize, const HEAD_CHANNELS: usize, const EMBED_DIM: 
     }
 
     fn named_children(&self) -> Vec<(String, &dyn Module)> {
-        vec![
+        let mut children: Vec<(String, &dyn Module)> = vec![
             ("local_convolution".to_string(), &self.local_convolution),
             (
                 "dilated_residual_convolution".to_string(),
                 &self.dilated_residual_convolution,
             ),
-            ("projection".to_string(), &self.projection),
-            ("classifier".to_string(), &self.classifier),
-        ]
+        ];
+        #[cfg(feature = "high-resolution")]
+        children.push((
+            "resolution_downsample_convolution".to_string(),
+            &self.resolution_downsample_convolution,
+        ));
+        children.extend([
+            ("projection".to_string(), &self.projection as &dyn Module),
+            ("classifier".to_string(), &self.classifier as &dyn Module),
+        ]);
+        children
     }
 }
 
@@ -292,6 +318,8 @@ struct FillTextureHead {
     fine_convolution: Conv2d,
     downsample_convolution_1: Conv2d,
     downsample_convolution_2: Conv2d,
+    #[cfg(feature = "high-resolution")]
+    resolution_downsample_convolution: Conv2d,
     projection: Linear,
     classifier: Linear,
 }
@@ -326,6 +354,16 @@ impl FillTextureHead {
                 (1, 1),
                 true,
             )?,
+            #[cfg(feature = "high-resolution")]
+            resolution_downsample_convolution: Conv2d::new(
+                session,
+                FILL_TEXTURE_CHANNELS,
+                FILL_TEXTURE_CHANNELS,
+                (3, 3),
+                (2, 2),
+                (1, 1),
+                true,
+            )?,
             projection: Linear::new(session, FILL_TEXTURE_FEATURES, FILL_TEXTURE_EMBED_DIM, true)?,
             classifier: Linear::new(session, FILL_TEXTURE_EMBED_DIM, ATTRIBUTE_VALUE_COUNT, true)?,
         })
@@ -344,6 +382,12 @@ impl Module for FillTextureHead {
         let encoded = self.downsample_convolution_1.forward(session, encoded)?;
         let encoded = session.tensor_gelu(encoded)?;
         let encoded = self.downsample_convolution_2.forward(session, encoded)?;
+        #[cfg(feature = "high-resolution")]
+        let encoded = {
+            let encoded = session.tensor_gelu(encoded)?;
+            self.resolution_downsample_convolution
+                .forward(session, encoded)?
+        };
         finish_attribute_head(
             session,
             encoded,
@@ -362,7 +406,7 @@ impl Module for FillTextureHead {
     }
 
     fn named_children(&self) -> Vec<(String, &dyn Module)> {
-        vec![
+        let mut children: Vec<(String, &dyn Module)> = vec![
             ("fine_convolution".to_string(), &self.fine_convolution),
             (
                 "downsample_convolution_1".to_string(),
@@ -372,9 +416,17 @@ impl Module for FillTextureHead {
                 "downsample_convolution_2".to_string(),
                 &self.downsample_convolution_2,
             ),
-            ("projection".to_string(), &self.projection),
-            ("classifier".to_string(), &self.classifier),
-        ]
+        ];
+        #[cfg(feature = "high-resolution")]
+        children.push((
+            "resolution_downsample_convolution".to_string(),
+            &self.resolution_downsample_convolution,
+        ));
+        children.extend([
+            ("projection".to_string(), &self.projection as &dyn Module),
+            ("classifier".to_string(), &self.classifier as &dyn Module),
+        ]);
+        children
     }
 }
 
@@ -483,6 +535,51 @@ impl<H: Module, const RELATION_CLASSES: usize, const SHARED_CHANNELS: usize>
         let attribute_probabilities = session.tensor_softmax(attribute_probabilities, 3)?;
         let (set_logits, relation_logits) =
             self.forward_relation_with_types(session, attribute_probabilities, batch_size)?;
+        Ok((set_logits, attribute_logits, relation_logits))
+    }
+
+    /// Scores every triple on one board without detaching card features from
+    /// autograd. This is the training counterpart of [`Self::score_board`].
+    fn forward_board_with_relations(
+        &self,
+        session: &mut FrankenTorchSession,
+        input: TensorNodeId,
+        card_count: usize,
+    ) -> Result<(TensorNodeId, TensorNodeId, TensorNodeId), AutogradError> {
+        let attribute_logits = self.attribute_logits_for_cards(session, input, card_count)?;
+        let attribute_probabilities = session.tensor_reshape(
+            attribute_logits,
+            vec![card_count, ATTRIBUTE_COUNT, ATTRIBUTE_VALUE_COUNT],
+        )?;
+        let attribute_probabilities = session.tensor_softmax(attribute_probabilities, 2)?;
+        let triple_count = card_count * (card_count - 1) * (card_count - 2) / 6;
+        let mut gather_indices = Vec::with_capacity(triple_count * 3 * ATTRIBUTE_LOGITS);
+        for first in 0..card_count - 2 {
+            for second in first + 1..card_count - 1 {
+                for third in second + 1..card_count {
+                    for card in [first, second, third] {
+                        let Ok(card_index) = u32::try_from(card) else {
+                            unreachable!("card index is bounded by the input tensor")
+                        };
+                        gather_indices
+                            .extend(std::iter::repeat_n(f64::from(card_index), ATTRIBUTE_LOGITS));
+                    }
+                }
+            }
+        }
+        let gather_indices = session.tensor_variable(
+            gather_indices,
+            vec![triple_count * 3, ATTRIBUTE_COUNT, ATTRIBUTE_VALUE_COUNT],
+            false,
+        )?;
+        let triple_probabilities =
+            session.tensor_gather(attribute_probabilities, 0, gather_indices)?;
+        let triple_probabilities = session.tensor_reshape(
+            triple_probabilities,
+            vec![triple_count, 3, ATTRIBUTE_COUNT, ATTRIBUTE_VALUE_COUNT],
+        )?;
+        let (set_logits, relation_logits) =
+            self.forward_relation_with_types(session, triple_probabilities, triple_count)?;
         Ok((set_logits, attribute_logits, relation_logits))
     }
 
@@ -777,6 +874,16 @@ impl DeployedVisualSetPolicy {
         self.core.forward_with_relations(session, input)
     }
 
+    pub fn forward_board_with_relations(
+        &self,
+        session: &mut FrankenTorchSession,
+        input: TensorNodeId,
+        card_count: usize,
+    ) -> Result<(TensorNodeId, TensorNodeId, TensorNodeId), AutogradError> {
+        self.core
+            .forward_board_with_relations(session, input, card_count)
+    }
+
     pub fn score_board(
         &self,
         session: &mut FrankenTorchSession,
@@ -1048,6 +1155,44 @@ mod tests {
         assert_eq!(board.scores.len(), direct.len());
         for (cached, repeated) in board.scores.iter().zip(direct) {
             assert!((cached - repeated).abs() < 1.0e-10);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn differentiable_board_path_matches_inference_scores() -> Result<(), Box<dyn std::error::Error>>
+    {
+        const CARD_COUNT: usize = 5;
+        let mut session = FrankenTorchSession::new(ExecutionMode::Strict);
+        let policy = DeployedVisualSetPolicy::new(&mut session)?;
+        session.no_grad_enter();
+        let pixels = (0..CARD_COUNT * CARD_PIXELS)
+            .map(|index| u32::try_from(index % 251).map(|value| f64::from(value) / 250.0))
+            .collect::<Result<Vec<_>, _>>()?;
+        let inference = policy.score_board(&mut session, pixels.clone(), CARD_COUNT)?;
+        let input = session.tensor_variable(pixels, vec![CARD_COUNT, CARD_PIXELS], false)?;
+        let (set_logits, attribute_logits, relation_logits) =
+            policy.forward_board_with_relations(&mut session, input, CARD_COUNT)?;
+
+        let differentiable_scores = session.tensor_values(set_logits)?;
+        let differentiable_attributes = session.tensor_values(attribute_logits)?;
+        let differentiable_relations = session.tensor_values(relation_logits)?;
+        for (left, right) in inference.scores.iter().zip(differentiable_scores) {
+            assert!((left - right).abs() < 1.0e-10);
+        }
+        for (left, right) in inference
+            .attribute_logits
+            .iter()
+            .zip(differentiable_attributes)
+        {
+            assert!((left - right).abs() < 1.0e-10);
+        }
+        for (left, right) in inference
+            .relation_logits
+            .iter()
+            .zip(differentiable_relations)
+        {
+            assert!((left - right).abs() < 1.0e-10);
         }
         Ok(())
     }

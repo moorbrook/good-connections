@@ -31,6 +31,13 @@ pub struct Parameter {
     pub values: Vec<f32>,
 }
 
+#[derive(Clone, Copy)]
+pub struct NegativeAggregateConfig {
+    pub weight: f32,
+    pub board_groups: usize,
+    pub count_correction: bool,
+}
+
 pub struct PolicyGraph {
     pub graph: Retained<MPSGraph>,
     pub pixels: Retained<MPSGraphTensor>,
@@ -229,8 +236,9 @@ impl PolicyGraph {
     pub fn new(
         init_seed: u64,
         typed_relations: bool,
-        negative_logsumexp_loss_weight: f32,
+        negative_aggregate: NegativeAggregateConfig,
         wide_vision: bool,
+        shape_loss_multiplier: f32,
         fill_loss_multiplier: f32,
     ) -> Self {
         let mut builder = Builder::new(init_seed);
@@ -298,6 +306,22 @@ impl PolicyGraph {
                 },
             );
             let encoded = builder.add(&encoded, &residual);
+            #[cfg(feature = "high-resolution")]
+            let encoded = {
+                let encoded = builder.activation(&encoded);
+                builder.convolution(
+                    &format!("{prefix}.resolution_downsample_convolution"),
+                    &encoded,
+                    ConvolutionSpec {
+                        input_channels: head_channels,
+                        output_channels: head_channels,
+                        kernel: 3,
+                        stride: 2,
+                        padding: 1,
+                        dilation: 1,
+                    },
+                )
+            };
             let encoded = builder.activation(&encoded);
             let encoded = builder.reshape(&encoded, &[CARD_COUNT, head_features]);
             let encoded = builder.linear(
@@ -353,6 +377,22 @@ impl PolicyGraph {
                     dilation: 1,
                 },
             );
+            #[cfg(feature = "high-resolution")]
+            let texture = {
+                let texture = builder.activation(&texture);
+                builder.convolution(
+                    "fill_texture_head.resolution_downsample_convolution",
+                    &texture,
+                    ConvolutionSpec {
+                        input_channels: FILL_TEXTURE_CHANNELS,
+                        output_channels: FILL_TEXTURE_CHANNELS,
+                        kernel: 3,
+                        stride: 2,
+                        padding: 1,
+                        dilation: 1,
+                    },
+                )
+            };
             let texture = builder.activation(&texture);
             let texture = builder.reshape(
                 &texture,
@@ -393,7 +433,9 @@ impl PolicyGraph {
                     None,
                 )
         };
-        if (fill_loss_multiplier - 1.0).abs() > f32::EPSILON {
+        if (shape_loss_multiplier - 1.0).abs() > f32::EPSILON
+            || (fill_loss_multiplier - 1.0).abs() > f32::EPSILON
+        {
             let attribute_classes_by_kind = builder.reshape(
                 &attribute_classes,
                 &[CARD_COUNT, ATTRIBUTE_COUNT, ATTRIBUTE_VALUE_COUNT],
@@ -402,6 +444,17 @@ impl PolicyGraph {
                 &attribute_labels,
                 &[CARD_COUNT, ATTRIBUTE_COUNT, ATTRIBUTE_VALUE_COUNT],
             );
+            let shape_classes = unsafe {
+                builder.graph.sliceTensor_dimension_start_length_name(
+                    &attribute_classes_by_kind,
+                    1,
+                    2,
+                    1,
+                    None,
+                )
+            };
+            let shape_classes =
+                builder.reshape(&shape_classes, &[CARD_COUNT, ATTRIBUTE_VALUE_COUNT]);
             let fill_classes = unsafe {
                 builder.graph.sliceTensor_dimension_start_length_name(
                     &attribute_classes_by_kind,
@@ -412,6 +465,16 @@ impl PolicyGraph {
                 )
             };
             let fill_classes = builder.reshape(&fill_classes, &[CARD_COUNT, ATTRIBUTE_VALUE_COUNT]);
+            let shape_labels = unsafe {
+                builder.graph.sliceTensor_dimension_start_length_name(
+                    &attribute_labels_by_kind,
+                    1,
+                    2,
+                    1,
+                    None,
+                )
+            };
+            let shape_labels = builder.reshape(&shape_labels, &[CARD_COUNT, ATTRIBUTE_VALUE_COUNT]);
             let fill_labels = unsafe {
                 builder.graph.sliceTensor_dimension_start_length_name(
                     &attribute_labels_by_kind,
@@ -422,6 +485,17 @@ impl PolicyGraph {
                 )
             };
             let fill_labels = builder.reshape(&fill_labels, &[CARD_COUNT, ATTRIBUTE_VALUE_COUNT]);
+            let shape_loss = unsafe {
+                builder
+                    .graph
+                    .softMaxCrossEntropyWithSourceTensor_labelsTensor_axis_reductionType_name(
+                        &shape_classes,
+                        &shape_labels,
+                        1,
+                        MPSGraphLossReductionType::Mean,
+                        None,
+                    )
+            };
             let fill_loss = unsafe {
                 builder
                     .graph
@@ -433,11 +507,17 @@ impl PolicyGraph {
                         None,
                     )
             };
-            let denominator = 3.0 + fill_loss_multiplier;
+            let denominator = 2.0 + shape_loss_multiplier + fill_loss_multiplier;
             let base_scale = unsafe {
                 builder
                     .graph
                     .constantWithScalar_dataType(f64::from(4.0 / denominator), MPSDataType::Float32)
+            };
+            let shape_scale = unsafe {
+                builder.graph.constantWithScalar_dataType(
+                    f64::from((shape_loss_multiplier - 1.0) / denominator),
+                    MPSDataType::Float32,
+                )
             };
             let fill_scale = unsafe {
                 builder.graph.constantWithScalar_dataType(
@@ -446,8 +526,10 @@ impl PolicyGraph {
                 )
             };
             let scaled_base = builder.mul(&attribute_loss, &base_scale);
+            let scaled_shape = builder.mul(&shape_loss, &shape_scale);
             let scaled_fill = builder.mul(&fill_loss, &fill_scale);
-            attribute_loss = builder.add(&scaled_base, &scaled_fill);
+            let scaled = builder.add(&scaled_base, &scaled_shape);
+            attribute_loss = builder.add(&scaled, &scaled_fill);
         }
 
         let probabilities = builder.reshape(
@@ -543,36 +625,59 @@ impl PolicyGraph {
             };
             loss = builder.add(&loss, &relation_loss);
         }
-        if negative_logsumexp_loss_weight > 0.0 {
-            let negative_logits = unsafe {
-                builder.graph.sliceTensor_dimension_start_length_name(
-                    &set_logits,
-                    0,
-                    (BATCH_SIZE / 2).cast_signed(),
-                    (BATCH_SIZE / 2).cast_signed(),
-                    None,
-                )
-            };
-            let negative_exponentials = unsafe {
-                builder
-                    .graph
-                    .exponentWithTensor_name(&negative_logits, None)
-            };
-            let negative_exponential_sum = unsafe {
-                builder
-                    .graph
-                    .reductionSumWithTensor_axis_name(&negative_exponentials, 0, None)
-            };
-            let negative_logsumexp = unsafe {
-                builder
-                    .graph
-                    .logarithmWithTensor_name(&negative_exponential_sum, None)
-            };
-            let negative_logsumexp = builder.reshape(&negative_logsumexp, &[1, 1]);
+        if negative_aggregate.weight > 0.0 {
+            let negatives_per_board = (BATCH_SIZE / 2) / negative_aggregate.board_groups;
+            // Slice each board explicitly and use the already parity-proven
+            // batch-axis reduction. This also makes the graph's grouping
+            // boundary independent of reshape/reduction layout semantics.
+            let negative_logsumexp_groups = (0..negative_aggregate.board_groups)
+                .map(|group| {
+                    let group_logits = unsafe {
+                        builder.graph.sliceTensor_dimension_start_length_name(
+                            &set_logits,
+                            0,
+                            (BATCH_SIZE / 2 + group * negatives_per_board).cast_signed(),
+                            negatives_per_board.cast_signed(),
+                            None,
+                        )
+                    };
+                    let exponentials =
+                        unsafe { builder.graph.exponentWithTensor_name(&group_logits, None) };
+                    let exponential_sum = unsafe {
+                        builder
+                            .graph
+                            .reductionSumWithTensor_axis_name(&exponentials, 0, None)
+                    };
+                    let logsumexp = unsafe {
+                        builder
+                            .graph
+                            .logarithmWithTensor_name(&exponential_sum, None)
+                    };
+                    builder.reshape(&logsumexp, &[1, 1])
+                })
+                .collect::<Vec<_>>();
+            let negative_logsumexp_refs = negative_logsumexp_groups
+                .iter()
+                .map(|tensor| &**tensor)
+                .collect::<Vec<_>>();
+            let mut negative_logsumexp = builder.concat(&negative_logsumexp_refs, 0);
+            if negative_aggregate.count_correction {
+                let Ok(group_count) = u32::try_from(negative_aggregate.board_groups) else {
+                    unreachable!("negative board groups cannot exceed the batch size")
+                };
+                let correction = unsafe {
+                    builder.graph.constantWithScalar_shape_dataType(
+                        f64::from(group_count).ln(),
+                        &shape(&[negative_aggregate.board_groups, 1]),
+                        MPSDataType::Float32,
+                    )
+                };
+                negative_logsumexp = builder.add(&negative_logsumexp, &correction);
+            }
             let zero = unsafe {
                 builder.graph.constantWithScalar_shape_dataType(
                     0.0,
-                    &shape(&[1, 1]),
+                    &shape(&[negative_aggregate.board_groups, 1]),
                     MPSDataType::Float32,
                 )
             };
@@ -582,7 +687,7 @@ impl PolicyGraph {
                     &set_labels,
                     0,
                     (BATCH_SIZE / 2).cast_signed(),
-                    1,
+                    negative_aggregate.board_groups.cast_signed(),
                     None,
                 )
             };
@@ -599,7 +704,7 @@ impl PolicyGraph {
             };
             let weight = unsafe {
                 builder.graph.constantWithScalar_dataType(
-                    f64::from(negative_logsumexp_loss_weight),
+                    f64::from(negative_aggregate.weight),
                     MPSDataType::Float32,
                 )
             };

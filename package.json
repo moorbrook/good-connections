@@ -9,6 +9,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:vision-stream": "node tools/test-vision-extension.mjs --stream",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },

@@ -1,15 +1,25 @@
-use std::{collections::BTreeMap, fs::File, io::BufReader, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    io::{BufRead, BufReader, Read},
+    path::Path,
+};
 
-use set_vision_contract::{CARD_HEIGHT, CARD_PIXELS, CARD_WIDTH, CHANNELS};
+use set_vision_contract::{ATTRIBUTE_COUNT, CARD_HEIGHT, CARD_PIXELS, CARD_WIDTH, CHANNELS};
 pub use set_vision_contract::{
     RELATION_CLASS_COUNT, RELATION_DIFFERENT, RELATION_INVALID, RELATION_SAME,
 };
+
+pub const CURRICULUM_RNG_SALT: u64 = 0xc011_ec7a_5eed_2026;
 
 const ATLAS_COLUMNS: usize = 9;
 const ATLAS_ROWS: usize = 9;
 const ATLAS_GAP: usize = 4;
 const ATLAS_PADDING: usize = 10;
 const DECK_SIZE: usize = 81;
+const BOARD_SIZE: usize = 12;
+const CURRICULUM_MAGIC: &str = "SET_VISION_CURRICULUM_V1";
+const MAX_CURRICULUM_SAMPLES: usize = 100_000;
 const ATTRIBUTE_VALUES: [f64; 3] = [0.0, 1.0, 2.0];
 
 type SamplingGroups = Vec<Vec<Vec<usize>>>;
@@ -34,6 +44,8 @@ pub enum BoardKind {
 pub struct BoardBatch {
     pub pixels: Vec<f64>,
     pub set_targets: Vec<f64>,
+    pub attribute_targets: Vec<f64>,
+    pub relation_targets: Vec<f64>,
     pub ids: Vec<usize>,
     pub atlas_index: usize,
     pub kind: BoardKind,
@@ -50,6 +62,202 @@ pub struct AtlasCollection {
     // Training samples a seed family before choosing one of its variants so
     // extra capture variants cannot crowd out procedural seed diversity.
     seed_sampling_groups: SeedSamplingGroups,
+}
+
+#[derive(Debug)]
+struct RenderedBoardSample {
+    kind: BoardKind,
+    ids: Vec<usize>,
+    chosen_ids: Vec<usize>,
+    cards: Vec<Vec<f64>>,
+}
+
+/// Pixel tensors streamed from the production browser renderer. A collection
+/// may contain ordinary generated training boards or failure-replay boards;
+/// no generated bitmap is persisted.
+#[derive(Debug)]
+pub struct RenderedBoardCollection {
+    samples: Vec<RenderedBoardSample>,
+    has_set_indices: Vec<usize>,
+    no_set_indices: Vec<usize>,
+}
+
+/// Read-only board view for pixel-only evaluation of an in-memory renderer stream.
+#[derive(Debug, Clone, Copy)]
+pub struct RenderedBoardView<'a> {
+    pub kind: BoardKind,
+    pub ids: &'a [usize],
+    pub cards: &'a [Vec<f64>],
+}
+
+impl RenderedBoardCollection {
+    pub fn read_framed(reader: impl Read) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut reader = BufReader::new(reader);
+        let sample_count = read_framed_header(&mut reader)?;
+        let mut samples = Vec::with_capacity(sample_count);
+        for sample_index in 0..sample_count {
+            samples.push(read_curriculum_sample(&mut reader, sample_index)?);
+        }
+        let has_set_indices = samples
+            .iter()
+            .enumerate()
+            .filter_map(|(index, sample)| (sample.kind == BoardKind::HasSet).then_some(index))
+            .collect();
+        let no_set_indices = samples
+            .iter()
+            .enumerate()
+            .filter_map(|(index, sample)| (sample.kind == BoardKind::NoSet).then_some(index))
+            .collect();
+        Ok(Self {
+            samples,
+            has_set_indices,
+            no_set_indices,
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
+    pub fn boards(&self) -> impl ExactSizeIterator<Item = RenderedBoardView<'_>> {
+        self.samples.iter().map(|sample| RenderedBoardView {
+            kind: sample.kind,
+            ids: &sample.ids,
+            cards: &sample.cards,
+        })
+    }
+
+    /// Decode and visit one rendered board at a time without retaining the
+    /// full stream. The board view is valid only for the duration of `visit`.
+    pub fn visit_framed(
+        reader: impl Read,
+        mut visit: impl FnMut(usize, RenderedBoardView<'_>) -> Result<(), Box<dyn std::error::Error>>,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let mut reader = BufReader::new(reader);
+        let sample_count = read_framed_header(&mut reader)?;
+        for sample_index in 0..sample_count {
+            let sample = read_curriculum_sample(&mut reader, sample_index)?;
+            visit(
+                sample_index,
+                RenderedBoardView {
+                    kind: sample.kind,
+                    ids: &sample.ids,
+                    cards: &sample.cards,
+                },
+            )?;
+        }
+        Ok(sample_count)
+    }
+}
+
+fn read_framed_header(reader: &mut impl BufRead) -> Result<usize, Box<dyn std::error::Error>> {
+    let magic = read_protocol_line(reader, "protocol magic")?;
+    if magic != CURRICULUM_MAGIC {
+        return Err(format!("invalid curriculum protocol magic: {magic:?}").into());
+    }
+    let sample_count = read_protocol_line(reader, "sample count")?.parse::<usize>()?;
+    if sample_count == 0 || sample_count > MAX_CURRICULUM_SAMPLES {
+        return Err(format!(
+            "curriculum sample count must be between 1 and {MAX_CURRICULUM_SAMPLES}"
+        )
+        .into());
+    }
+    Ok(sample_count)
+}
+
+fn read_curriculum_sample(
+    reader: &mut impl BufRead,
+    sample_index: usize,
+) -> Result<RenderedBoardSample, Box<dyn std::error::Error>> {
+    let header = read_protocol_line(reader, "sample header")?;
+    let fields = header.split('\t').collect::<Vec<_>>();
+    if fields.len() != 5 {
+        return Err(format!(
+            "curriculum sample {} header has {} fields, expected 5",
+            sample_index + 1,
+            fields.len()
+        )
+        .into());
+    }
+    let name = fields[0];
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+    {
+        return Err(format!("invalid curriculum sample name: {name:?}").into());
+    }
+    let kind = match fields[1] {
+        "has-set" => BoardKind::HasSet,
+        "no-set" => BoardKind::NoSet,
+        other => return Err(format!("invalid curriculum board kind: {other:?}").into()),
+    };
+    let ids = parse_card_ids(fields[2], BOARD_SIZE, "board IDs")?;
+    let chosen_ids = if fields[3] == "-" {
+        Vec::new()
+    } else {
+        parse_card_ids(fields[3], 3, "chosen IDs")?
+    };
+    let float_count = fields[4].parse::<usize>()?;
+    let expected_float_count = BOARD_SIZE * CARD_PIXELS;
+    if float_count != expected_float_count {
+        return Err(format!(
+            "curriculum sample {} has {float_count} floats, expected {expected_float_count}",
+            sample_index + 1
+        )
+        .into());
+    }
+    if board_has_set(&ids) != (kind == BoardKind::HasSet) {
+        return Err(format!(
+            "curriculum sample {} board IDs disagree with kind {kind:?}",
+            sample_index + 1
+        )
+        .into());
+    }
+    if chosen_ids.iter().any(|id| !ids.contains(id)) {
+        return Err(format!(
+            "curriculum sample {} chosen IDs are not all on the board",
+            sample_index + 1
+        )
+        .into());
+    }
+    let byte_count = float_count
+        .checked_mul(size_of::<f32>())
+        .ok_or("curriculum tensor byte count overflow")?;
+    let mut bytes = vec![0_u8; byte_count];
+    reader.read_exact(&mut bytes)?;
+    let (float_bytes, remainder) = bytes.as_chunks::<4>();
+    if !remainder.is_empty() {
+        return Err("curriculum tensor bytes are not aligned to f32".into());
+    }
+    let pixels = float_bytes
+        .iter()
+        .map(|chunk| f64::from(f32::from_le_bytes(*chunk)))
+        .collect::<Vec<_>>();
+    if pixels
+        .iter()
+        .any(|pixel| !pixel.is_finite() || !(0.0..=1.0).contains(pixel))
+    {
+        return Err(format!(
+            "curriculum sample {} contains invalid pixels",
+            sample_index + 1
+        )
+        .into());
+    }
+    let (pixel_cards, remainder) = pixels.as_chunks::<CARD_PIXELS>();
+    if !remainder.is_empty() {
+        return Err("curriculum tensor is not aligned to whole cards".into());
+    }
+    Ok(RenderedBoardSample {
+        kind,
+        ids,
+        chosen_ids,
+        cards: pixel_cards.iter().map(|card| card.to_vec()).collect(),
+    })
 }
 
 impl AtlasCollection {
@@ -145,30 +353,52 @@ impl AtlasCollection {
         size: usize,
         augment: bool,
     ) -> Batch {
+        self.make_multi_board_correlated_training_batch(rng, size, augment, 1)
+            .unwrap_or_else(|error| unreachable!("one negative board is valid: {error}"))
+    }
+
+    /// Make a grouped batch whose negative half is partitioned across several
+    /// independent No-SET boards and atlas conditions. Each contiguous group
+    /// can receive its own aggregate false-positive loss.
+    pub fn make_multi_board_correlated_training_batch(
+        &self,
+        rng: &mut Rng,
+        size: usize,
+        augment: bool,
+        negative_board_groups: usize,
+    ) -> Result<Batch, &'static str> {
         let positive_count = size / 2;
         let negative_count = size - positive_count;
+        if negative_board_groups == 0 || !negative_count.is_multiple_of(negative_board_groups) {
+            return Err("negative board groups must divide the negative half of the batch");
+        }
+        let negatives_per_board = negative_count / negative_board_groups;
         let seed_offset = rng.next_u64();
-        let board_ids = sample_board_ids(rng, 12, BoardKind::NoSet);
-        let mut board_triples = Vec::with_capacity(220);
-        for first in 0..board_ids.len() - 2 {
-            for second in first + 1..board_ids.len() - 1 {
-                for third in second + 1..board_ids.len() {
-                    board_triples.push([board_ids[first], board_ids[second], board_ids[third]]);
+        let mut negative_groups = Vec::with_capacity(negative_board_groups);
+        for group in 0..negative_board_groups {
+            let board_ids = sample_board_ids(rng, 12, BoardKind::NoSet);
+            let mut board_triples = Vec::with_capacity(220);
+            for first in 0..board_ids.len() - 2 {
+                for second in first + 1..board_ids.len() - 1 {
+                    for third in second + 1..board_ids.len() {
+                        board_triples.push([board_ids[first], board_ids[second], board_ids[third]]);
+                    }
                 }
             }
+            for index in 0..negatives_per_board.min(board_triples.len()) {
+                let replacement = index + rng.index(board_triples.len() - index);
+                board_triples.swap(index, replacement);
+            }
+            let theme_group = rng.index(self.sampling_groups.len());
+            let raster_group = rng.index(self.sampling_groups[theme_group].len());
+            let atlas = sample_seed_stratified_atlas(
+                rng,
+                &self.seed_sampling_groups[theme_group][raster_group],
+                positive_count + group,
+                seed_offset,
+            );
+            negative_groups.push((board_triples, atlas));
         }
-        for index in 0..negative_count.min(board_triples.len()) {
-            let replacement = index + rng.index(board_triples.len() - index);
-            board_triples.swap(index, replacement);
-        }
-        let negative_theme_group = rng.index(self.sampling_groups.len());
-        let negative_raster_group = rng.index(self.sampling_groups[negative_theme_group].len());
-        let negative_theme = sample_seed_stratified_atlas(
-            rng,
-            &self.seed_sampling_groups[negative_theme_group][negative_raster_group],
-            positive_count,
-            seed_offset,
-        );
 
         let mut pixels = Vec::with_capacity(size * 3 * CARD_PIXELS);
         let mut set_targets = Vec::with_capacity(size);
@@ -180,7 +410,9 @@ impl AtlasCollection {
             let mut ids = if is_set {
                 positive_triple(rng)
             } else {
-                board_triples[(sample - positive_count) % board_triples.len()]
+                let negative_index = sample - positive_count;
+                let group = negative_index / negatives_per_board;
+                negative_groups[group].0[negative_index % negatives_per_board]
             };
             shuffle_three(rng, &mut ids);
             let theme = if is_set {
@@ -193,11 +425,126 @@ impl AtlasCollection {
                     seed_offset,
                 )
             } else {
-                negative_theme
+                let negative_index = sample - positive_count;
+                negative_groups[negative_index / negatives_per_board].1
             };
             atlas_indices.push(theme);
             for id in ids {
                 append_card(&mut pixels, &self.cards[theme][id], rng, augment);
+                attribute_targets.extend(decode_card(id).map(|value| ATTRIBUTE_VALUES[value]));
+            }
+            relation_targets.extend(relation_targets_for_triple(ids));
+            set_targets.push(f64::from(is_set));
+        }
+        Ok(Batch {
+            pixels,
+            set_targets,
+            attribute_targets,
+            relation_targets,
+            atlas_indices,
+        })
+    }
+
+    /// Preserve the ordinary grouped batch while replacing a sparse prefix of
+    /// its negative half with distinct triples from one generated No-SET board.
+    pub fn make_sparse_board_correlated_training_batch(
+        &self,
+        rng: &mut Rng,
+        size: usize,
+        augment: bool,
+        correlated_negative_count: usize,
+    ) -> Result<Batch, &'static str> {
+        let positive_count = size / 2;
+        let negative_count = size - positive_count;
+        if correlated_negative_count == 0 || correlated_negative_count > negative_count {
+            return Err("correlated negative count must fit within the negative half of the batch");
+        }
+        let mut batch = self.make_grouped_training_batch(rng, size, augment);
+        let correlated = self.make_board_correlated_training_batch(rng, size, augment);
+        for offset in 0..correlated_negative_count {
+            replace_batch_sample(
+                &mut batch,
+                &correlated,
+                positive_count + offset,
+                positive_count + offset,
+            );
+        }
+        Ok(batch)
+    }
+
+    /// Make a grouped batch centered on one browser-observed failure. Exact
+    /// board pixels supply every available positive/negative triple. A no-SET
+    /// failure has no positive examples, so its positive half comes from the
+    /// ordinary atlas corpus while the negative half remains the exact board.
+    pub fn make_curriculum_training_batch(
+        &self,
+        curriculum: &RenderedBoardCollection,
+        rng: &mut Rng,
+        size: usize,
+    ) -> Batch {
+        let curriculum_index = rng.index(curriculum.samples.len());
+        self.make_curriculum_training_batch_for_index(curriculum, rng, size, curriculum_index)
+    }
+
+    fn make_curriculum_training_batch_for_index(
+        &self,
+        curriculum: &RenderedBoardCollection,
+        rng: &mut Rng,
+        size: usize,
+        curriculum_index: usize,
+    ) -> Batch {
+        let sample = &curriculum.samples[curriculum_index];
+        let (positives, mut negatives) = board_position_triples(&sample.ids);
+        if let Some(chosen) = chosen_positions(sample)
+            && !triple_is_set(&sample.ids, chosen)
+        {
+            negatives.retain(|candidate| *candidate != chosen);
+            negatives.insert(0, chosen);
+        }
+        let positive_count = size / 2;
+        let mut pixels = Vec::with_capacity(size * 3 * CARD_PIXELS);
+        let mut set_targets = Vec::with_capacity(size);
+        let mut attribute_targets = Vec::with_capacity(size * 3 * 4);
+        let mut relation_targets = Vec::with_capacity(size * 4);
+        let mut atlas_indices = Vec::with_capacity(size);
+        let seed_offset = rng.next_u64();
+
+        for batch_index in 0..size {
+            let is_set = batch_index < positive_count;
+            let exact_positions = if is_set {
+                (!positives.is_empty()).then(|| positives[batch_index % positives.len()])
+            } else {
+                (!negatives.is_empty())
+                    .then(|| negatives[(batch_index - positive_count) % negatives.len()])
+            };
+            let ids = if let Some(positions) = exact_positions {
+                atlas_indices.push(self.cards.len() + curriculum_index);
+                for position in positions {
+                    append_card(&mut pixels, &sample.cards[position], rng, false);
+                }
+                positions.map(|position| sample.ids[position])
+            } else {
+                let mut ids = if is_set {
+                    positive_triple(rng)
+                } else {
+                    hard_negative_triple(rng)
+                };
+                shuffle_three(rng, &mut ids);
+                let theme_group = rng.index(self.sampling_groups.len());
+                let raster_group = rng.index(self.sampling_groups[theme_group].len());
+                let atlas = sample_seed_stratified_atlas(
+                    rng,
+                    &self.seed_sampling_groups[theme_group][raster_group],
+                    batch_index,
+                    seed_offset,
+                );
+                atlas_indices.push(atlas);
+                for id in ids {
+                    append_card(&mut pixels, &self.cards[atlas][id], rng, false);
+                }
+                ids
+            };
+            for id in ids {
                 attribute_targets.extend(decode_card(id).map(|value| ATTRIBUTE_VALUES[value]));
             }
             relation_targets.extend(relation_targets_for_triple(ids));
@@ -210,6 +557,86 @@ impl AtlasCollection {
             relation_targets,
             atlas_indices,
         }
+    }
+
+    /// Replace a small, label-balanced portion of an already-generated base
+    /// batch with exact curriculum examples. Keeping the remaining samples in
+    /// place prevents a hard board from monopolizing an optimizer step.
+    pub fn mix_curriculum_training_batch(
+        &self,
+        curriculum: &RenderedBoardCollection,
+        rng: &mut Rng,
+        mut base: Batch,
+        examples_per_label: usize,
+    ) -> Batch {
+        let size = base.set_targets.len();
+        let positive_count = size / 2;
+        let replacements = examples_per_label.min(positive_count);
+        if replacements == 0 || size < 2 {
+            return base;
+        }
+        let curriculum_batch = self.make_curriculum_training_batch(curriculum, rng, size);
+        for offset in 0..replacements {
+            replace_batch_sample(
+                &mut base,
+                &curriculum_batch,
+                positive_count - replacements + offset,
+                offset,
+            );
+            replace_batch_sample(
+                &mut base,
+                &curriculum_batch,
+                positive_count + offset,
+                positive_count + offset,
+            );
+        }
+        base
+    }
+
+    /// Replace only labels implicated by the observed failure. A No-SET
+    /// false positive contributes its selected hard negative. A Has-SET
+    /// false negative contributes a real positive; a wrong proposed triple
+    /// additionally contributes that hard negative.
+    pub fn mix_targeted_curriculum_training_batch(
+        &self,
+        curriculum: &RenderedBoardCollection,
+        rng: &mut Rng,
+        mut base: Batch,
+        examples_per_label: usize,
+    ) -> Batch {
+        let size = base.set_targets.len();
+        let positive_count = size / 2;
+        let replacements = examples_per_label.min(positive_count);
+        if replacements == 0 || size < 2 {
+            return base;
+        }
+        let curriculum_index = rng.index(curriculum.samples.len());
+        let sample = &curriculum.samples[curriculum_index];
+        let curriculum_batch =
+            self.make_curriculum_training_batch_for_index(curriculum, rng, size, curriculum_index);
+        let has_wrong_proposal =
+            chosen_positions(sample).is_some_and(|chosen| !triple_is_set(&sample.ids, chosen));
+        if sample.kind == BoardKind::HasSet {
+            for offset in 0..replacements {
+                replace_batch_sample(
+                    &mut base,
+                    &curriculum_batch,
+                    positive_count - replacements + offset,
+                    offset,
+                );
+            }
+        }
+        if sample.kind == BoardKind::NoSet || has_wrong_proposal {
+            for offset in 0..replacements {
+                replace_batch_sample(
+                    &mut base,
+                    &curriculum_batch,
+                    positive_count + offset,
+                    positive_count + offset,
+                );
+            }
+        }
+        base
     }
 
     fn make_batch_with_sampling(
@@ -288,26 +715,52 @@ impl AtlasCollection {
         card_count: usize,
         kind: BoardKind,
     ) -> BoardBatch {
+        self.make_board_of_kind_with_augmentation(rng, card_count, kind, false)
+    }
+
+    pub fn make_training_board_of_kind(
+        &self,
+        rng: &mut Rng,
+        card_count: usize,
+        kind: BoardKind,
+    ) -> BoardBatch {
+        self.make_board_of_kind_with_augmentation(rng, card_count, kind, true)
+    }
+
+    fn make_board_of_kind_with_augmentation(
+        &self,
+        rng: &mut Rng,
+        card_count: usize,
+        kind: BoardKind,
+        augment: bool,
+    ) -> BoardBatch {
         let ids = sample_board_ids(rng, card_count, kind);
         let theme = rng.index(self.cards.len());
         let triple_count = card_count * (card_count - 1) * (card_count - 2) / 6;
         let mut pixels = Vec::with_capacity(card_count * CARD_PIXELS);
+        let mut attribute_targets = Vec::with_capacity(card_count * ATTRIBUTE_COUNT);
         for &id in &ids {
-            append_card(&mut pixels, &self.cards[theme][id], rng, false);
+            append_card(&mut pixels, &self.cards[theme][id], rng, augment);
+            attribute_targets.extend(decode_card(id).map(|value| ATTRIBUTE_VALUES[value]));
         }
         let mut set_targets = Vec::with_capacity(triple_count);
+        let mut relation_targets = Vec::with_capacity(triple_count * ATTRIBUTE_COUNT);
         for first in 0..card_count - 2 {
             for second in first + 1..card_count - 1 {
                 for third in second + 1..card_count {
+                    let triple = [ids[first], ids[second], ids[third]];
                     set_targets.push(f64::from(
-                        completing_card(ids[first], ids[second]) == ids[third],
+                        completing_card(triple[0], triple[1]) == triple[2],
                     ));
+                    relation_targets.extend(relation_targets_for_triple(triple));
                 }
             }
         }
         BoardBatch {
             pixels,
             set_targets,
+            attribute_targets,
+            relation_targets,
             ids,
             atlas_index: theme,
             kind,
@@ -325,6 +778,150 @@ impl AtlasCollection {
     pub fn name(&self, index: usize) -> &str {
         &self.names[index]
     }
+}
+
+impl RenderedBoardCollection {
+    /// Draw one complete rendered board of the requested kind for
+    /// differentiable board-action training.
+    pub fn make_board_of_kind(
+        &self,
+        rng: &mut Rng,
+        kind: BoardKind,
+    ) -> Result<BoardBatch, &'static str> {
+        let candidates = match kind {
+            BoardKind::HasSet => &self.has_set_indices,
+            BoardKind::NoSet => &self.no_set_indices,
+        };
+        if candidates.is_empty() {
+            return Err("rendered-board collection has no board of the requested kind");
+        }
+        let sample_index = candidates[rng.index(candidates.len())];
+        let sample = &self.samples[sample_index];
+        let card_count = sample.ids.len();
+        let triple_count = card_count * (card_count - 1) * (card_count - 2) / 6;
+        let mut pixels = Vec::with_capacity(card_count * CARD_PIXELS);
+        let mut attribute_targets = Vec::with_capacity(card_count * ATTRIBUTE_COUNT);
+        for (&id, card) in sample.ids.iter().zip(&sample.cards) {
+            pixels.extend_from_slice(card);
+            attribute_targets.extend(decode_card(id).map(|value| ATTRIBUTE_VALUES[value]));
+        }
+        let mut set_targets = Vec::with_capacity(triple_count);
+        let mut relation_targets = Vec::with_capacity(triple_count * ATTRIBUTE_COUNT);
+        for first in 0..card_count - 2 {
+            for second in first + 1..card_count - 1 {
+                for third in second + 1..card_count {
+                    let triple = [sample.ids[first], sample.ids[second], sample.ids[third]];
+                    set_targets.push(f64::from(
+                        completing_card(triple[0], triple[1]) == triple[2],
+                    ));
+                    relation_targets.extend(relation_targets_for_triple(triple));
+                }
+            }
+        }
+        Ok(BoardBatch {
+            pixels,
+            set_targets,
+            attribute_targets,
+            relation_targets,
+            ids: sample.ids.clone(),
+            atlas_index: sample_index,
+            kind,
+        })
+    }
+
+    /// Draw a label-balanced triple batch directly from browser-rendered
+    /// boards. Each triple independently selects a board, so ordinary live
+    /// data is not collapsed into one correlated board per optimizer step.
+    pub fn make_balanced_training_batch(
+        &self,
+        rng: &mut Rng,
+        size: usize,
+    ) -> Result<Batch, &'static str> {
+        if self.has_set_indices.is_empty() {
+            return Err("rendered-board training requires at least one Has-SET board");
+        }
+        let positive_count = size / 2;
+        let mut pixels = Vec::with_capacity(size * 3 * CARD_PIXELS);
+        let mut set_targets = Vec::with_capacity(size);
+        let mut attribute_targets = Vec::with_capacity(size * 3 * 4);
+        let mut relation_targets = Vec::with_capacity(size * 4);
+        let mut atlas_indices = Vec::with_capacity(size);
+        for batch_index in 0..size {
+            let is_set = batch_index < positive_count;
+            let sample_index = if is_set {
+                self.has_set_indices[rng.index(self.has_set_indices.len())]
+            } else {
+                rng.index(self.samples.len())
+            };
+            let sample = &self.samples[sample_index];
+            let (positives, negatives) = board_position_triples(&sample.ids);
+            let candidates = if is_set { &positives } else { &negatives };
+            if candidates.is_empty() {
+                return Err("rendered board has no triple for the requested label");
+            }
+            let mut positions = candidates[rng.index(candidates.len())];
+            shuffle_three(rng, &mut positions);
+            let ids = positions.map(|position| sample.ids[position]);
+            for position in positions {
+                append_card(&mut pixels, &sample.cards[position], rng, false);
+            }
+            for id in ids {
+                attribute_targets.extend(decode_card(id).map(|value| ATTRIBUTE_VALUES[value]));
+            }
+            relation_targets.extend(relation_targets_for_triple(ids));
+            set_targets.push(f64::from(is_set));
+            atlas_indices.push(sample_index);
+        }
+        Ok(Batch {
+            pixels,
+            set_targets,
+            attribute_targets,
+            relation_targets,
+            atlas_indices,
+        })
+    }
+}
+
+fn replace_batch_sample(destination: &mut Batch, source: &Batch, to: usize, from: usize) {
+    const PIXEL_VALUES: usize = 3 * CARD_PIXELS;
+    const ATTRIBUTE_VALUES_PER_TRIPLE: usize = 3 * 4;
+    const RELATION_VALUES_PER_TRIPLE: usize = 4;
+    copy_sample_values(
+        &mut destination.pixels,
+        &source.pixels,
+        to,
+        from,
+        PIXEL_VALUES,
+    );
+    copy_sample_values(
+        &mut destination.attribute_targets,
+        &source.attribute_targets,
+        to,
+        from,
+        ATTRIBUTE_VALUES_PER_TRIPLE,
+    );
+    copy_sample_values(
+        &mut destination.relation_targets,
+        &source.relation_targets,
+        to,
+        from,
+        RELATION_VALUES_PER_TRIPLE,
+    );
+    destination.set_targets[to] = source.set_targets[from];
+    destination.atlas_indices[to] = source.atlas_indices[from];
+}
+
+fn copy_sample_values<T: Copy>(
+    destination: &mut [T],
+    source: &[T],
+    to: usize,
+    from: usize,
+    width: usize,
+) {
+    let destination_start = to * width;
+    let source_start = from * width;
+    destination[destination_start..destination_start + width]
+        .copy_from_slice(&source[source_start..source_start + width]);
 }
 
 fn atlas_sampling_keys(name: &str) -> (&str, &str) {
@@ -359,6 +956,84 @@ fn atlas_device_scale(name: &str) -> usize {
         .find_map(|part| part.strip_prefix("dpr")?.parse::<usize>().ok())
         .filter(|&scale| scale > 0)
         .unwrap_or(1)
+}
+
+fn read_protocol_line(
+    reader: &mut impl BufRead,
+    field: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut line = String::new();
+    if reader.read_line(&mut line)? == 0 {
+        return Err(format!("unexpected end of curriculum stream while reading {field}").into());
+    }
+    if !line.ends_with('\n') {
+        return Err(format!("unterminated curriculum {field}").into());
+    }
+    line.pop();
+    if line.ends_with('\r') {
+        line.pop();
+    }
+    Ok(line)
+}
+
+fn parse_card_ids(
+    value: &str,
+    expected_count: usize,
+    field: &str,
+) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
+    let ids = value
+        .split(',')
+        .map(str::parse::<usize>)
+        .collect::<Result<Vec<_>, _>>()?;
+    if ids.len() != expected_count || ids.iter().any(|&id| id >= DECK_SIZE) {
+        return Err(format!(
+            "{field} must contain {expected_count} comma-separated IDs from 0 through {}",
+            DECK_SIZE - 1
+        )
+        .into());
+    }
+    let mut unique = ids.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    if unique.len() != ids.len() {
+        return Err(format!("{field} must not contain duplicates").into());
+    }
+    Ok(ids)
+}
+
+fn triple_is_set(ids: &[usize], positions: [usize; 3]) -> bool {
+    completing_card(ids[positions[0]], ids[positions[1]]) == ids[positions[2]]
+}
+
+fn board_position_triples(ids: &[usize]) -> (Vec<[usize; 3]>, Vec<[usize; 3]>) {
+    let mut positives = Vec::new();
+    let mut negatives = Vec::new();
+    for first in 0..ids.len() - 2 {
+        for second in first + 1..ids.len() - 1 {
+            for third in second + 1..ids.len() {
+                let positions = [first, second, third];
+                if triple_is_set(ids, positions) {
+                    positives.push(positions);
+                } else {
+                    negatives.push(positions);
+                }
+            }
+        }
+    }
+    (positives, negatives)
+}
+
+fn chosen_positions(sample: &RenderedBoardSample) -> Option<[usize; 3]> {
+    let [first, second, third] = sample.chosen_ids.as_slice() else {
+        return None;
+    };
+    let mut positions = [
+        sample.ids.iter().position(|id| id == first)?,
+        sample.ids.iter().position(|id| id == second)?,
+        sample.ids.iter().position(|id| id == third)?,
+    ];
+    positions.sort_unstable();
+    Some(positions)
 }
 
 fn board_has_set(ids: &[usize]) -> bool {
@@ -827,7 +1502,7 @@ impl Rng {
         usize::try_from(self.next_u64() % upper).unwrap_or(0)
     }
 
-    fn chance(&mut self, probability: f64) -> bool {
+    pub fn chance(&mut self, probability: f64) -> bool {
         self.range(0.0, 1.0) < probability
     }
 
@@ -841,10 +1516,12 @@ impl Rng {
 #[cfg(test)]
 mod tests {
     use super::{
-        AtlasCollection, AugmentationPlan, BoardKind, CARD_HEIGHT, CARD_PIXELS, CARD_WIDTH,
-        DECK_SIZE, RELATION_DIFFERENT, RELATION_INVALID, RELATION_SAME, Rng, append_card,
-        area_resample_rgb, atlas_device_scale, atlas_sampling_keys, atlas_seed_key, board_has_set,
-        completing_card, decode_card, hard_negative_triple, relation_targets_for_triple,
+        ATTRIBUTE_COUNT, AtlasCollection, AugmentationPlan, BOARD_SIZE, BoardKind, CARD_HEIGHT,
+        CARD_PIXELS, CARD_WIDTH, CURRICULUM_MAGIC, DECK_SIZE, RELATION_DIFFERENT, RELATION_INVALID,
+        RELATION_SAME, RenderedBoardCollection, Rng, append_card, area_resample_rgb,
+        atlas_device_scale, atlas_sampling_keys, atlas_seed_key, board_has_set,
+        board_position_triples, completing_card, decode_card, hard_negative_triple,
+        relation_targets_for_triple, replace_batch_sample, sample_board_ids,
         sample_seed_stratified_atlas,
     };
 
@@ -939,6 +1616,342 @@ mod tests {
             .map(|attributes| attributes.map(f64::to_bits))
             .collect::<std::collections::BTreeSet<_>>();
         assert!(unique_ids.len() <= 12);
+    }
+
+    #[test]
+    fn multi_board_correlated_negatives_form_contiguous_groups() {
+        let collection = fixture_collection();
+        let mut rng = Rng::new(0x5eed);
+        let batch = collection
+            .make_multi_board_correlated_training_batch(&mut rng, 64, false, 8)
+            .unwrap_or_else(|error| unreachable!("eight groups divide 32: {error}"));
+        assert_eq!(&batch.set_targets[..32], &[1.0; 32]);
+        for group in 0..8 {
+            let start = 32 + group * 4;
+            assert!(
+                batch.atlas_indices[start..start + 4]
+                    .iter()
+                    .all(|&atlas| atlas == batch.atlas_indices[start])
+            );
+            let attribute_start = start * 3 * 4;
+            let attribute_end = (start + 4) * 3 * 4;
+            let (cards, remainder) =
+                batch.attribute_targets[attribute_start..attribute_end].as_chunks::<4>();
+            assert_eq!(remainder, []);
+            let unique_ids = cards
+                .iter()
+                .map(|attributes| attributes.map(f64::to_bits))
+                .collect::<std::collections::BTreeSet<_>>();
+            assert!(unique_ids.len() <= 12);
+        }
+    }
+
+    #[test]
+    fn multi_board_correlated_negatives_reject_invalid_group_count() {
+        let collection = fixture_collection();
+        let mut rng = Rng::new(0x5eed);
+        assert!(
+            collection
+                .make_multi_board_correlated_training_batch(&mut rng, 64, false, 3)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn sparse_board_correlated_batch_replaces_only_requested_negative_prefix() {
+        let collection = fixture_collection();
+        let mut expected_rng = Rng::new(0x5eed);
+        let mut expected = collection.make_grouped_training_batch(&mut expected_rng, 64, false);
+        let correlated =
+            collection.make_board_correlated_training_batch(&mut expected_rng, 64, false);
+        for offset in 0..4 {
+            replace_batch_sample(&mut expected, &correlated, 32 + offset, 32 + offset);
+        }
+
+        let mut actual_rng = Rng::new(0x5eed);
+        let actual = collection
+            .make_sparse_board_correlated_training_batch(&mut actual_rng, 64, false, 4)
+            .unwrap_or_else(|error| unreachable!("four negatives fit: {error}"));
+        assert_eq!(actual.pixels, expected.pixels);
+        assert_eq!(actual.set_targets, expected.set_targets);
+        assert_eq!(actual.attribute_targets, expected.attribute_targets);
+        assert_eq!(actual.relation_targets, expected.relation_targets);
+        assert_eq!(actual.atlas_indices, expected.atlas_indices);
+        assert!(
+            actual.atlas_indices[32..36]
+                .iter()
+                .all(|&atlas| atlas == actual.atlas_indices[32])
+        );
+    }
+
+    #[test]
+    fn sparse_board_correlated_batch_rejects_invalid_counts() {
+        let collection = fixture_collection();
+        for count in [0, 33] {
+            assert!(
+                collection
+                    .make_sparse_board_correlated_training_batch(
+                        &mut Rng::new(0x5eed),
+                        64,
+                        false,
+                        count,
+                    )
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn framed_curriculum_decodes_exact_in_memory_card_tensors() {
+        let (bytes, ids, _) = curriculum_fixture();
+        let curriculum = RenderedBoardCollection::read_framed(bytes.as_slice())
+            .unwrap_or_else(|error| unreachable!("fixture protocol must decode: {error}"));
+        assert_eq!(curriculum.len(), 1);
+        assert_eq!(curriculum.samples[0].ids, ids);
+        assert_eq!(curriculum.samples[0].cards.len(), 12);
+        assert_eq!(
+            curriculum.samples[0].cards[3][17],
+            f64::from(3.0_f32 / 12.0)
+        );
+        let board = curriculum
+            .boards()
+            .next()
+            .unwrap_or_else(|| unreachable!("fixture must contain a board"));
+        assert_eq!(board.ids, ids);
+        assert_eq!(board.cards.len(), 12);
+    }
+
+    #[test]
+    fn framed_boards_can_be_visited_without_a_collection() {
+        let (bytes, ids, _) = curriculum_fixture();
+        let mut visited = 0;
+        let count = RenderedBoardCollection::visit_framed(bytes.as_slice(), |index, board| {
+            assert_eq!(index, 0);
+            assert_eq!(board.ids, ids);
+            assert_eq!(board.cards.len(), 12);
+            visited += 1;
+            Ok(())
+        })
+        .unwrap_or_else(|error| unreachable!("fixture must stream: {error}"));
+        assert_eq!(count, 1);
+        assert_eq!(visited, 1);
+    }
+
+    #[test]
+    fn rendered_board_batch_is_label_balanced_and_draws_multiple_boards() {
+        let curriculum =
+            RenderedBoardCollection::read_framed(balanced_rendered_board_fixture().as_slice())
+                .unwrap_or_else(|error| unreachable!("fixture protocol must decode: {error}"));
+        let mut rng = Rng::new(0xb04d);
+        let batch = curriculum
+            .make_balanced_training_batch(&mut rng, 64)
+            .unwrap_or_else(|error| unreachable!("balanced fixture must sample: {error}"));
+        assert_eq!(&batch.set_targets[..32], &[1.0; 32]);
+        assert_eq!(&batch.set_targets[32..], &[0.0; 32]);
+        assert!(batch.atlas_indices[..32].iter().all(|&index| index == 1));
+        assert!(batch.atlas_indices[32..].contains(&0));
+        assert!(batch.atlas_indices[32..].contains(&1));
+        assert_eq!(batch.pixels.len(), 64 * 3 * CARD_PIXELS);
+        assert_eq!(batch.attribute_targets.len(), 64 * 3 * 4);
+        assert_eq!(batch.relation_targets.len(), 64 * 4);
+    }
+
+    #[test]
+    fn rendered_board_batch_requires_positive_source_board() {
+        let (bytes, _, _) = curriculum_fixture();
+        let curriculum = RenderedBoardCollection::read_framed(bytes.as_slice())
+            .unwrap_or_else(|error| unreachable!("fixture protocol must decode: {error}"));
+        let error = curriculum
+            .make_balanced_training_batch(&mut Rng::new(1), 8)
+            .err();
+        assert_eq!(
+            error,
+            Some("rendered-board training requires at least one Has-SET board")
+        );
+    }
+
+    #[test]
+    fn rendered_full_board_sampler_preserves_pixels_and_complete_targets()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let collection =
+            RenderedBoardCollection::read_framed(balanced_rendered_board_fixture().as_slice())?;
+        let mut rng = Rng::new(0x27);
+        for kind in [BoardKind::HasSet, BoardKind::NoSet] {
+            let board = collection
+                .make_board_of_kind(&mut rng, kind)
+                .map_err(std::io::Error::other)?;
+            assert_eq!(board.kind, kind);
+            assert_eq!(board.ids.len(), BOARD_SIZE);
+            assert_eq!(board.pixels.len(), BOARD_SIZE * CARD_PIXELS);
+            assert_eq!(board.attribute_targets.len(), BOARD_SIZE * ATTRIBUTE_COUNT);
+            assert_eq!(board.set_targets.len(), 220);
+            assert_eq!(board.relation_targets.len(), 220 * ATTRIBUTE_COUNT);
+            assert_eq!(board_has_set(&board.ids), kind == BoardKind::HasSet);
+            assert_eq!(
+                board.set_targets.iter().any(|&target| target > 0.5),
+                kind == BoardKind::HasSet
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn curriculum_batch_prioritizes_the_observed_wrong_triple() {
+        let collection = fixture_collection();
+        let (bytes, board_ids, chosen_ids) = curriculum_fixture();
+        let curriculum = RenderedBoardCollection::read_framed(bytes.as_slice())
+            .unwrap_or_else(|error| unreachable!("fixture protocol must decode: {error}"));
+        let mut rng = Rng::new(0xfeed);
+        let batch = collection.make_curriculum_training_batch(&curriculum, &mut rng, 10);
+        assert_eq!(&batch.set_targets[..5], &[1.0; 5]);
+        assert_eq!(&batch.set_targets[5..], &[0.0; 5]);
+        assert!(
+            batch.atlas_indices[5..]
+                .iter()
+                .all(|&index| index == collection.len())
+        );
+
+        let first_negative_attributes = &batch.attribute_targets[5 * 3 * 4..6 * 3 * 4];
+        let expected_attributes = board_ids
+            .iter()
+            .copied()
+            .filter(|id| chosen_ids.contains(id))
+            .flat_map(|id| {
+                decode_card(id).map(|value| f64::from(u32::try_from(value).unwrap_or(0)))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(first_negative_attributes, expected_attributes);
+    }
+
+    #[test]
+    fn sparse_curriculum_mix_replaces_only_requested_label_slots() {
+        let collection = fixture_collection();
+        let (bytes, _, _) = curriculum_fixture();
+        let curriculum = RenderedBoardCollection::read_framed(bytes.as_slice())
+            .unwrap_or_else(|error| unreachable!("fixture protocol must decode: {error}"));
+        let mut base_rng = Rng::new(0xbeef);
+        let base = collection.make_grouped_training_batch(&mut base_rng, 10, false);
+        let original_atlases = base.atlas_indices.clone();
+        let mut curriculum_rng = Rng::new(0xcafe);
+        let mixed =
+            collection.mix_curriculum_training_batch(&curriculum, &mut curriculum_rng, base, 1);
+
+        assert_eq!(
+            mixed.set_targets,
+            [1.0; 5].into_iter().chain([0.0; 5]).collect::<Vec<_>>()
+        );
+        assert_eq!(&mixed.atlas_indices[..4], &original_atlases[..4]);
+        assert_eq!(&mixed.atlas_indices[6..], &original_atlases[6..]);
+        assert_eq!(mixed.atlas_indices[5], collection.len());
+    }
+
+    #[test]
+    fn targeted_no_set_mix_preserves_positive_slots() {
+        let collection = fixture_collection();
+        let (bytes, _, _) = curriculum_fixture();
+        let curriculum = RenderedBoardCollection::read_framed(bytes.as_slice())
+            .unwrap_or_else(|error| unreachable!("fixture protocol must decode: {error}"));
+        let mut base_rng = Rng::new(0xbeef);
+        let base = collection.make_grouped_training_batch(&mut base_rng, 10, false);
+        let original_atlases = base.atlas_indices.clone();
+        let mut curriculum_rng = Rng::new(0xcafe);
+        let mixed = collection.mix_targeted_curriculum_training_batch(
+            &curriculum,
+            &mut curriculum_rng,
+            base,
+            1,
+        );
+
+        assert_eq!(&mixed.atlas_indices[..5], &original_atlases[..5]);
+        assert_eq!(mixed.atlas_indices[5], collection.len());
+        assert_eq!(&mixed.atlas_indices[6..], &original_atlases[6..]);
+    }
+
+    #[test]
+    fn targeted_has_set_false_negative_preserves_negative_slots() {
+        let collection = fixture_collection();
+        let bytes = has_set_curriculum_fixture();
+        let curriculum = RenderedBoardCollection::read_framed(bytes.as_slice())
+            .unwrap_or_else(|error| unreachable!("fixture protocol must decode: {error}"));
+        let mut base_rng = Rng::new(0xbeef);
+        let base = collection.make_grouped_training_batch(&mut base_rng, 10, false);
+        let original_atlases = base.atlas_indices.clone();
+        let mut curriculum_rng = Rng::new(0xcafe);
+        let mixed = collection.mix_targeted_curriculum_training_batch(
+            &curriculum,
+            &mut curriculum_rng,
+            base,
+            1,
+        );
+
+        assert_eq!(&mixed.atlas_indices[..4], &original_atlases[..4]);
+        assert_eq!(mixed.atlas_indices[4], collection.len());
+        assert_eq!(&mixed.atlas_indices[5..], &original_atlases[5..]);
+    }
+
+    fn curriculum_fixture() -> (Vec<u8>, Vec<usize>, Vec<usize>) {
+        let mut rng = Rng::new(0x0c01_1ec7);
+        let ids = sample_board_ids(&mut rng, 12, BoardKind::NoSet);
+        let (_, negatives) = board_position_triples(&ids);
+        let chosen_ids = negatives[0].map(|position| ids[position]).to_vec();
+        let float_count = 12 * CARD_PIXELS;
+        let mut bytes = format!(
+            "{CURRICULUM_MAGIC}\n1\nfixture-1\tno-set\t{}\t{}\t{float_count}\n",
+            ids.iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            chosen_ids
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+        .into_bytes();
+        for card in 0..12 {
+            let value = f32::from(u8::try_from(card).unwrap_or(0)) / 12.0;
+            for _ in 0..CARD_PIXELS {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        (bytes, ids, chosen_ids)
+    }
+
+    fn has_set_curriculum_fixture() -> Vec<u8> {
+        let mut rng = Rng::new(0x5e7);
+        let ids = sample_board_ids(&mut rng, 12, BoardKind::HasSet);
+        let float_count = 12 * CARD_PIXELS;
+        let mut bytes = format!(
+            "{CURRICULUM_MAGIC}\n1\nfixture-has-set\thas-set\t{}\t-\t{float_count}\n",
+            ids.iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+        .into_bytes();
+        for card in 0..12 {
+            let value = f32::from(u8::try_from(card).unwrap_or(0)) / 12.0;
+            for _ in 0..CARD_PIXELS {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        bytes
+    }
+
+    fn balanced_rendered_board_fixture() -> Vec<u8> {
+        let (no_set, _, _) = curriculum_fixture();
+        let has_set = has_set_curriculum_fixture();
+        let mut bytes = format!("{CURRICULUM_MAGIC}\n2\n").into_bytes();
+        for framed in [&no_set, &has_set] {
+            let payload_start = framed
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &byte)| (byte == b'\n').then_some(index + 1))
+                .nth(1)
+                .unwrap_or(framed.len());
+            bytes.extend_from_slice(&framed[payload_start..]);
+        }
+        bytes
     }
 
     fn fixture_collection() -> AtlasCollection {

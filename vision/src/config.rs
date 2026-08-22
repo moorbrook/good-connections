@@ -20,6 +20,7 @@ pub(crate) struct TrainConfig {
     pub(crate) learning_rate: f64,
     pub(crate) attribute_loss_weight: f64,
     pub(crate) fill_loss_multiplier: f64,
+    pub(crate) shape_loss_multiplier: f64,
     pub(crate) relation_loss_weight: f64,
     pub(crate) negative_logsumexp_loss_weight: f64,
     pub(crate) seed: u64,
@@ -34,7 +35,16 @@ pub(crate) struct TrainConfig {
     pub(crate) export_board_evidence: bool,
     pub(crate) mixed_boards: bool,
     pub(crate) board_correlated_negatives: bool,
+    pub(crate) negative_board_groups: usize,
+    pub(crate) negative_group_count_correction: bool,
+    pub(crate) board_correlated_negative_count: usize,
     pub(crate) wide_vision: bool,
+    pub(crate) curriculum_stdin: bool,
+    pub(crate) curriculum_rate: f64,
+    pub(crate) curriculum_examples_per_label: usize,
+    pub(crate) targeted_curriculum: bool,
+    pub(crate) browser_training_stdin: bool,
+    pub(crate) browser_batch_rate: f64,
 }
 
 impl Default for TrainConfig {
@@ -58,6 +68,7 @@ impl Default for TrainConfig {
             learning_rate: 8.0e-4,
             attribute_loss_weight: 0.35,
             fill_loss_multiplier: 1.0,
+            shape_loss_multiplier: 1.0,
             relation_loss_weight: 1.0,
             negative_logsumexp_loss_weight: 0.0,
             seed: 0x5e7_2026,
@@ -72,7 +83,16 @@ impl Default for TrainConfig {
             export_board_evidence: false,
             mixed_boards: false,
             board_correlated_negatives: false,
+            negative_board_groups: 1,
+            negative_group_count_correction: false,
+            board_correlated_negative_count: 0,
             wide_vision: false,
+            curriculum_stdin: false,
+            curriculum_rate: 0.25,
+            curriculum_examples_per_label: usize::MAX,
+            targeted_curriculum: false,
+            browser_training_stdin: false,
+            browser_batch_rate: 0.5,
         }
     }
 }
@@ -97,6 +117,9 @@ impl TrainConfig {
                 "--fill-loss-multiplier" => {
                     config.fill_loss_multiplier = parse_value(&mut args, &flag)?;
                 }
+                "--shape-loss-multiplier" => {
+                    config.shape_loss_multiplier = parse_value(&mut args, &flag)?;
+                }
                 "--relation-loss-weight" => {
                     config.relation_loss_weight = parse_value(&mut args, &flag)?;
                 }
@@ -116,7 +139,28 @@ impl TrainConfig {
                 "--export-board-evidence" => config.export_board_evidence = true,
                 "--mixed-boards" => config.mixed_boards = true,
                 "--board-correlated-negatives" => config.board_correlated_negatives = true,
+                "--negative-board-groups" => {
+                    config.negative_board_groups = parse_value(&mut args, &flag)?;
+                }
+                "--negative-group-count-correction" => {
+                    config.negative_group_count_correction = true;
+                }
+                "--board-correlated-negative-count" => {
+                    config.board_correlated_negative_count = parse_value(&mut args, &flag)?;
+                }
                 "--wide-vision" => config.wide_vision = true,
+                "--curriculum-stdin" => config.curriculum_stdin = true,
+                "--curriculum-rate" => {
+                    config.curriculum_rate = parse_value(&mut args, &flag)?;
+                }
+                "--curriculum-examples-per-label" => {
+                    config.curriculum_examples_per_label = parse_value(&mut args, &flag)?;
+                }
+                "--targeted-curriculum" => config.targeted_curriculum = true,
+                "--browser-training-stdin" => config.browser_training_stdin = true,
+                "--browser-batch-rate" => {
+                    config.browser_batch_rate = parse_value(&mut args, &flag)?;
+                }
                 "--atlas-dir" => config.atlas_dir = PathBuf::from(next_value(&mut args, &flag)?),
                 "--validation-atlas-dir" => {
                     config.validation_atlas_dir = PathBuf::from(next_value(&mut args, &flag)?);
@@ -172,15 +216,57 @@ impl TrainConfig {
             || self.attribute_loss_weight < 0.0
             || !self.fill_loss_multiplier.is_finite()
             || self.fill_loss_multiplier <= 0.0
+            || !self.shape_loss_multiplier.is_finite()
+            || self.shape_loss_multiplier <= 0.0
             || self.relation_loss_weight < 0.0
             || !self.negative_logsumexp_loss_weight.is_finite()
             || self.negative_logsumexp_loss_weight < 0.0
         {
             return Err(
-                "learning rate and fill multiplier must be positive; loss weights must be non-negative"
+                "learning rate and attribute multipliers must be positive; loss weights must be non-negative"
                     .to_string(),
             );
         }
+        self.validate_negative_sampling_options()?;
+        if self.wide_vision && !self.typed_relations {
+            return Err("--wide-vision requires --typed-relations".to_string());
+        }
+        if self.export_board_evidence && !self.typed_relations {
+            return Err("--export-board-evidence requires --typed-relations".to_string());
+        }
+        if !self.curriculum_rate.is_finite()
+            || self.curriculum_rate < 0.0
+            || self.curriculum_rate > 1.0
+        {
+            return Err("--curriculum-rate must be finite and between zero and one".to_string());
+        }
+        if self.curriculum_stdin && (self.eval_only || self.probe_only) {
+            return Err("--curriculum-stdin is available only during training".to_string());
+        }
+        if self.curriculum_examples_per_label == 0 {
+            return Err("--curriculum-examples-per-label must be positive".to_string());
+        }
+        if self.targeted_curriculum && !self.curriculum_stdin {
+            return Err("--targeted-curriculum requires --curriculum-stdin".to_string());
+        }
+        if !self.browser_batch_rate.is_finite()
+            || self.browser_batch_rate < 0.0
+            || self.browser_batch_rate > 1.0
+        {
+            return Err("--browser-batch-rate must be finite and between zero and one".to_string());
+        }
+        if self.browser_training_stdin && (self.eval_only || self.probe_only) {
+            return Err("--browser-training-stdin is available only during training".to_string());
+        }
+        if self.browser_training_stdin && self.curriculum_stdin {
+            return Err(
+                "--browser-training-stdin cannot be combined with --curriculum-stdin".to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    fn validate_negative_sampling_options(&self) -> Result<(), String> {
         if self.negative_logsumexp_loss_weight > 0.0 && !self.typed_relations {
             return Err("--negative-logsumexp-loss-weight requires --typed-relations".to_string());
         }
@@ -193,11 +279,41 @@ impl TrainConfig {
                     .to_string(),
             );
         }
-        if self.wide_vision && !self.typed_relations {
-            return Err("--wide-vision requires --typed-relations".to_string());
+        if self.negative_board_groups == 0
+            || !(self.batch_size / 2).is_multiple_of(self.negative_board_groups)
+        {
+            return Err("--negative-board-groups must divide half the batch size".to_string());
         }
-        if self.export_board_evidence && !self.typed_relations {
-            return Err("--export-board-evidence requires --typed-relations".to_string());
+        if self.negative_board_groups != 1 && !self.board_correlated_negatives {
+            return Err(
+                "--negative-board-groups requires --board-correlated-negatives".to_string(),
+            );
+        }
+        if self.negative_group_count_correction && self.negative_board_groups == 1 {
+            return Err(
+                "--negative-group-count-correction requires multiple negative board groups"
+                    .to_string(),
+            );
+        }
+        if self.board_correlated_negative_count == 0 {
+            return Ok(());
+        }
+        if self.negative_logsumexp_loss_weight == 0.0 {
+            return Err(
+                "--board-correlated-negative-count requires --negative-logsumexp-loss-weight"
+                    .to_string(),
+            );
+        }
+        if self.board_correlated_negative_count > self.batch_size / 2 {
+            return Err(
+                "--board-correlated-negative-count must fit within half the batch".to_string(),
+            );
+        }
+        if self.board_correlated_negatives || self.negative_board_groups != 1 {
+            return Err(
+                "--board-correlated-negative-count cannot be combined with grouped board negatives"
+                    .to_string(),
+            );
         }
         Ok(())
     }
@@ -294,9 +410,14 @@ impl TrainConfig {
     pub(crate) fn usage() -> &'static str {
         "Usage: cargo run --release -- [--steps N] [--batch-size N] \
          [--learning-rate RATE] [--attribute-loss-weight WEIGHT] [--seed N] [--atlas-dir PATH] \
-         [--fill-loss-multiplier MULTIPLIER] \
+         [--shape-loss-multiplier MULTIPLIER] [--fill-loss-multiplier MULTIPLIER] \
          [--relation-loss-weight WEIGHT] [--negative-logsumexp-loss-weight WEIGHT] \
-         [--legacy-untyped] [--mixed-boards] [--board-correlated-negatives] [--wide-vision] \
+         [--legacy-untyped] [--mixed-boards] [--board-correlated-negatives] \
+         [--negative-board-groups N] [--negative-group-count-correction] [--wide-vision] \
+         [--board-correlated-negative-count N] \
+         [--curriculum-stdin] [--curriculum-rate 0..1] \
+         [--curriculum-examples-per-label N] [--targeted-curriculum] \
+         [--browser-training-stdin] [--browser-batch-rate 0..1] \
          [--export-board-evidence] \
          [--validation-atlas-dir PATH] [--output-dir PATH] [--eval-only] \
          [--ensemble-output-dir PATH] \
@@ -398,11 +519,16 @@ mod tests {
             "--export-board-evidence",
             "--relation-loss-weight",
             "1.5",
+            "--shape-loss-multiplier",
+            "2.0",
             "--fill-loss-multiplier",
             "3.0",
             "--negative-logsumexp-loss-weight",
             "2.0",
             "--board-correlated-negatives",
+            "--negative-board-groups",
+            "4",
+            "--negative-group-count-correction",
             "--wide-vision",
         ]
         .into_iter()
@@ -415,9 +541,12 @@ mod tests {
         assert!(config.mixed_boards);
         assert!(config.export_board_evidence);
         assert!((config.relation_loss_weight - 1.5).abs() < f64::EPSILON);
+        assert!((config.shape_loss_multiplier - 2.0).abs() < f64::EPSILON);
         assert!((config.fill_loss_multiplier - 3.0).abs() < f64::EPSILON);
         assert!((config.negative_logsumexp_loss_weight - 2.0).abs() < f64::EPSILON);
         assert!(config.board_correlated_negatives);
+        assert_eq!(config.negative_board_groups, 4);
+        assert!(config.negative_group_count_correction);
         assert!(config.wide_vision);
     }
 
@@ -462,6 +591,67 @@ mod tests {
             .into_iter()
             .map(str::to_string);
         assert!(TrainConfig::from_iter(invalid_fill).is_err());
+
+        let invalid_shape = ["--shape-loss-multiplier", "0"]
+            .into_iter()
+            .map(str::to_string);
+        assert!(TrainConfig::from_iter(invalid_shape).is_err());
+
+        let missing_sampler = ["--negative-board-groups", "4"]
+            .into_iter()
+            .map(str::to_string);
+        assert!(TrainConfig::from_iter(missing_sampler).is_err());
+
+        let invalid_groups = [
+            "--negative-logsumexp-loss-weight",
+            "2.5",
+            "--board-correlated-negatives",
+            "--negative-board-groups",
+            "3",
+        ]
+        .into_iter()
+        .map(str::to_string);
+        assert!(TrainConfig::from_iter(invalid_groups).is_err());
+
+        let correction_without_groups = ["--negative-group-count-correction"]
+            .into_iter()
+            .map(str::to_string);
+        assert!(TrainConfig::from_iter(correction_without_groups).is_err());
+
+        let sparse_without_loss = ["--board-correlated-negative-count", "4"]
+            .into_iter()
+            .map(str::to_string);
+        assert!(TrainConfig::from_iter(sparse_without_loss).is_err());
+
+        let sparse_too_large = [
+            "--negative-logsumexp-loss-weight",
+            "2.5",
+            "--board-correlated-negative-count",
+            "33",
+        ]
+        .into_iter()
+        .map(str::to_string);
+        assert!(TrainConfig::from_iter(sparse_too_large).is_err());
+    }
+
+    #[test]
+    fn sparse_board_correlated_negative_count_parses() {
+        let config = TrainConfig::from_iter(
+            [
+                "--negative-logsumexp-loss-weight",
+                "2.5",
+                "--board-correlated-negative-count",
+                "4",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+        assert_eq!(config.board_correlated_negative_count, 4);
+        assert!(!config.board_correlated_negatives);
+        assert_eq!(config.negative_board_groups, 1);
     }
 
     #[test]
@@ -475,6 +665,91 @@ mod tests {
 
         let default = TrainConfig::default();
         assert!(default.typed_relations);
+    }
+
+    #[test]
+    fn curriculum_is_training_only_and_rate_is_bounded() {
+        let config = TrainConfig::from_iter([
+            "--curriculum-stdin".to_string(),
+            "--curriculum-rate".to_string(),
+            "0.4".to_string(),
+        ])
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+        assert!(config.curriculum_stdin);
+        assert!((config.curriculum_rate - 0.4).abs() < f64::EPSILON);
+        assert_eq!(config.curriculum_examples_per_label, usize::MAX);
+
+        let sparse = TrainConfig::from_iter([
+            "--curriculum-stdin".to_string(),
+            "--curriculum-examples-per-label".to_string(),
+            "2".to_string(),
+        ])
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+        assert_eq!(sparse.curriculum_examples_per_label, 2);
+
+        let targeted = TrainConfig::from_iter([
+            "--curriculum-stdin".to_string(),
+            "--targeted-curriculum".to_string(),
+        ])
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+        assert!(targeted.targeted_curriculum);
+        assert!(TrainConfig::from_iter(["--targeted-curriculum".to_string()]).is_err());
+
+        for invalid in ["-0.1", "1.1", "NaN", "inf"] {
+            let args = ["--curriculum-rate", invalid]
+                .into_iter()
+                .map(str::to_string);
+            assert!(TrainConfig::from_iter(args).is_err());
+        }
+        let audit_input = ["--eval-only", "--curriculum-stdin"]
+            .into_iter()
+            .map(str::to_string);
+        assert!(TrainConfig::from_iter(audit_input).is_err());
+        let zero_examples = ["--curriculum-examples-per-label", "0"]
+            .into_iter()
+            .map(str::to_string);
+        assert!(TrainConfig::from_iter(zero_examples).is_err());
+    }
+
+    #[test]
+    fn browser_training_stream_is_distinct_and_rate_is_bounded() {
+        let config = TrainConfig::from_iter([
+            "--browser-training-stdin".to_string(),
+            "--browser-batch-rate".to_string(),
+            "1.0".to_string(),
+        ])
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+        assert!(config.browser_training_stdin);
+        assert!((config.browser_batch_rate - 1.0).abs() < f64::EPSILON);
+
+        for invalid in ["-0.1", "1.1", "NaN", "inf"] {
+            let args = ["--browser-batch-rate", invalid]
+                .into_iter()
+                .map(str::to_string);
+            assert!(TrainConfig::from_iter(args).is_err());
+        }
+        assert!(
+            TrainConfig::from_iter([
+                "--browser-training-stdin".to_string(),
+                "--curriculum-stdin".to_string(),
+            ])
+            .is_err()
+        );
+        assert!(
+            TrainConfig::from_iter([
+                "--eval-only".to_string(),
+                "--browser-training-stdin".to_string(),
+            ])
+            .is_err()
+        );
     }
 
     #[test]

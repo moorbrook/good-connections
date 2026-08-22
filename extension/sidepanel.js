@@ -1,4 +1,6 @@
 import initFrankenTorch from './set_vision_runtime.js'
+import { boardActionIsSet, boardHeadRequiresTripleScores, validateBoardHead } from './board-head.js'
+import { aggregateViewEvidence, pixelGridBoxes } from './multiview.js'
 import { areaResampleRgb } from './preprocess.js'
 import {
   boardTransitionPass,
@@ -18,6 +20,7 @@ let modelShape
 let currentTab
 let currentObservation
 let autoPlaying = false
+let boardHead
 
 async function loadModel() {
   wasm = await initFrankenTorch({
@@ -32,6 +35,9 @@ async function loadModel() {
   if (!modelShape.width || !modelShape.height || modelShape.channels !== 3) {
     throw new Error('embedded model requires an unsupported image shape')
   }
+  const boardHeadResponse = await fetch(chrome.runtime.getURL('board-head.json'))
+  if (!boardHeadResponse.ok) throw new Error(`board head config failed to load: ${boardHeadResponse.status}`)
+  boardHead = validateBoardHead(await boardHeadResponse.json())
   status.textContent = 'Local FrankenTorch/WASM policy ready'
 }
 
@@ -46,7 +52,7 @@ async function installReader(tabId) {
   await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] })
 }
 
-async function screenshotPixels(tab, rects, viewport) {
+async function screenshotPixelViews(tab, rects, viewport) {
   if (!modelShape) throw new Error('Model dimensions are unavailable')
   const { width: cardWidth, height: cardHeight } = modelShape
   // Chrome's headless mode cannot exercise these two UI-bound APIs. The local
@@ -65,14 +71,48 @@ async function screenshotPixels(tab, rects, viewport) {
   canvas.height = image.naturalHeight
   const context = canvas.getContext('2d', { willReadFrequently: true })
   context.drawImage(image, 0, 0)
-  return rects.flatMap((rect) => {
-    const left = Math.max(0, Math.floor(rect.left * scaleX))
-    const top = Math.max(0, Math.floor(rect.top * scaleY))
-    const width = Math.max(1, Math.min(image.naturalWidth - left, Math.round(rect.width * scaleX)))
-    const height = Math.max(1, Math.min(image.naturalHeight - top, Math.round(rect.height * scaleY)))
-    const rgba = context.getImageData(left, top, width, height).data
-    return areaResampleRgb(rgba, width, height, cardWidth, cardHeight)
-  })
+  const viewCount = globalThis.__setVisionHeadlessIo?.multiView ? 4 : 1
+  const views = Array.from({ length: viewCount }, () => [])
+  for (const rect of rects) {
+    const boxes = pixelGridBoxes(rect, scaleX, scaleY, image.naturalWidth, image.naturalHeight)
+    for (let view = 0; view < viewCount; view++) {
+      const box = boxes[view]
+      const rgba = context.getImageData(box.left, box.top, box.width, box.height).data
+      views[view].push(...areaResampleRgb(rgba, box.width, box.height, cardWidth, cardHeight))
+    }
+  }
+  return views
+}
+
+function inferPixelView(pixels, cardCount, collectEvidence) {
+  if (wasm.reset_cards(cardCount) !== 1) throw new Error('Board size is unsupported')
+  for (let index = 0; index < pixels.length; index++) wasm.set_pixel(index, pixels[index])
+  const packed = wasm.best_triple()
+  if (packed === 0xffffffff) throw new Error('Model could not score this board')
+  const result = {
+    choice: [(packed >>> 16) & 255, (packed >>> 8) & 255, packed & 255],
+    score: wasm.last_score(),
+    scoreMargin: wasm.last_score_margin(),
+    attributeEntropy: wasm.last_attribute_entropy(),
+    attributeMargin: wasm.last_attribute_margin(),
+    scoreMean: wasm.last_score_mean(),
+    scoreStddev: wasm.last_score_stddev(),
+    scoreLogsumexp: wasm.last_score_logsumexp(),
+    positiveScoreFraction: wasm.last_positive_score_fraction(),
+  }
+  if (collectEvidence) {
+    const attributeProbabilityCount = cardCount * 4 * 3
+    const tripleCount = cardCount * (cardCount - 1) * (cardCount - 2) / 6
+    result.attributeProbabilities = Array.from(
+      { length: attributeProbabilityCount },
+      (_, index) => wasm.last_attribute_probability(index),
+    )
+    result.tripleScores = Array.from(
+      { length: tripleCount },
+      (_, index) => wasm.last_triple_score(index),
+    )
+  }
+  return result
 }
 
 async function observeBoard(tab = undefined) {
@@ -87,27 +127,41 @@ async function observeBoard(tab = undefined) {
     throw new Error(`Found ${geometry?.rects?.length ?? 0} visible cards with ${selector}`)
   }
   status.textContent = `Capturing ${geometry.rects.length} cards…`
-  const pixels = await screenshotPixels(currentTab, geometry.rects, geometry.viewport)
+  const pixelViews = await screenshotPixelViews(currentTab, geometry.rects, geometry.viewport)
   status.textContent = `Running local policy on ${geometry.rects.length} cards…`
   const inferenceStarted = performance.now()
-  if (wasm.reset_cards(geometry.rects.length) !== 1) throw new Error('Board size is unsupported')
-  for (let index = 0; index < pixels.length; index++) wasm.set_pixel(index, pixels[index])
-  const packed = wasm.best_triple()
-  if (packed === 0xffffffff) throw new Error('Model could not score this board')
+  const multiView = pixelViews.length > 1
+  const collectEvidence = Boolean(globalThis.__setVisionHeadlessIo?.collectEvidence)
+  const includeNeuralArrays = collectEvidence || multiView || boardHeadRequiresTripleScores(boardHead)
+  const viewResults = pixelViews.map((pixels) =>
+    inferPixelView(pixels, geometry.rects.length, includeNeuralArrays))
+  const neural = multiView
+    ? aggregateViewEvidence(viewResults, geometry.rects.length)
+    : viewResults[0]
   const observation = {
     tab: currentTab,
     selector,
     cardCount: geometry.rects.length,
-    pixels,
-    choice: [(packed >>> 16) & 255, (packed >>> 8) & 255, packed & 255],
-    actionIsSet: wasm.last_action_is_set() === 1,
-    score: wasm.last_score(),
-    scoreMargin: wasm.last_score_margin(),
-    attributeEntropy: wasm.last_attribute_entropy(),
-    attributeMargin: wasm.last_attribute_margin(),
+    pixels: pixelViews[0],
+    choice: neural.choice,
+    score: neural.score,
+    scoreMargin: neural.scoreMargin,
+    attributeEntropy: neural.attributeEntropy,
+    attributeMargin: neural.attributeMargin,
+    scoreMean: neural.scoreMean,
+    scoreStddev: neural.scoreStddev,
+    scoreLogsumexp: neural.scoreLogsumexp,
+    positiveScoreFraction: neural.positiveScoreFraction,
   }
+  if (collectEvidence) {
+    observation.attributeProbabilities = neural.attributeProbabilities
+  }
+  if (neural.tripleScores) observation.tripleScores = neural.tripleScores
+  observation.actionIsSet = boardActionIsSet(observation, boardHead)
   const tripleCount = geometry.rects.length * (geometry.rects.length - 1) * (geometry.rects.length - 2) / 6
-  observation.summary = `Scored ${tripleCount} visual triples in ${(performance.now() - inferenceStarted).toFixed(1)} ms`
+  observation.summary = multiView
+    ? `Scored ${tripleCount} visual triples across ${pixelViews.length} pixel-grid views in ${(performance.now() - inferenceStarted).toFixed(1)} ms`
+    : `Scored ${tripleCount} visual triples in ${(performance.now() - inferenceStarted).toFixed(1)} ms`
   return observation
 }
 
@@ -129,6 +183,22 @@ async function scanBoard() {
   await new Promise((resolve) => setTimeout(resolve, 90))
   const second = await observeBoard(first.tab)
   const accepted = first.actionIsSet && second.actionIsSet && repeatedObservationPass(first, second)
+  if (globalThis.__setVisionHeadlessIo) {
+    globalThis.__setVisionLastDiagnostics = {
+      choice: second.choice,
+      actionIsSet: second.actionIsSet,
+      score: second.score,
+      scoreMargin: second.scoreMargin,
+      attributeEntropy: second.attributeEntropy,
+      attributeMargin: second.attributeMargin,
+      scoreMean: second.scoreMean,
+      scoreStddev: second.scoreStddev,
+      scoreLogsumexp: second.scoreLogsumexp,
+      positiveScoreFraction: second.positiveScoreFraction,
+      attributeProbabilities: second.attributeProbabilities,
+      tripleScores: second.tripleScores,
+    }
+  }
   currentObservation = accepted ? second : undefined
   renderObservation(second, accepted)
   await chrome.tabs.sendMessage(currentTab.id, {

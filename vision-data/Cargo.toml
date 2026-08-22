@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+default = []
+high-resolution = ["set-vision-contract/high-resolution"]
+
 [dependencies]
 png = "0.17.16"
 set-vision-contract = { path = "../vision-contract" }

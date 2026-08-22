@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+default = []
+high-resolution = ["set-vision-contract/high-resolution"]
+
 [dependencies]
 ft-api = { package = "frankentorch-api", git = "https://github.com/Dicklesworthstone/frankentorch", rev = "dd6daf414e84462d2e0f35d8c103e1321e758b44" }
 ft-autograd = { package = "frankentorch-autograd", git = "https://github.com/Dicklesworthstone/frankentorch", rev = "dd6daf414e84462d2e0f35d8c103e1321e758b44" }

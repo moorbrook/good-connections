@@ -167,6 +167,65 @@ responsive browser proposals were valid; 7 passed the guard, completed their cli
 pixel-level board transition. A 1,000-iteration Node/WASM benchmark measured 5.62 ms
 cached inference and 5.73 ms including pixel transfer per 12-card board on the current host.
 
+## Generative streaming evaluation and active curriculum
+
+The browser harness can generate an unbounded balanced stream of fresh `HasSet` and `NoSet`
+boards. Every iteration randomizes the board seed, per-card visual seed, theme, capture profile,
+responsive viewport, and device scale. The extension receives only live screenshot pixels and element
+geometry. The harness reads card IDs only after the frozen action, when it independently scores the
+prediction.
+
+Mine failures continuously:
+
+```sh
+npm run test:vision-stream -- --seed 20260819
+```
+
+The miner writes each failure as a reproducible JSONL record to
+`vision-artifacts/stream-curriculum.jsonl`. Later iterations sample both fresh cases and cases from
+that growing curriculum; one quarter of focused cases are exact replays and the rest mutate the
+failed conditions. `--focus-rate 0.5` controls the fresh/focused mixture. The record stores the board
+and visual seeds, theme, viewport, DPR, board kind, and post-prediction oracle result, so a training
+cycle can lazily regenerate pixels in memory without retaining screenshots.
+
+Feed the mined failures into a new MPSGraph training run without creating an image corpus:
+
+```sh
+npm run build
+cargo build --release --manifest-path vision-mpsgraph/Cargo.toml
+set -o pipefail
+node tools/render-vision-boards.mjs \
+  --curriculum vision-artifacts/stream-curriculum.jsonl \
+| vision-mpsgraph/target/release/set-vision-mpsgraph \
+  --steps 10000 --negative-logsumexp-loss-weight 2.5 \
+  --curriculum-stdin --curriculum-rate 0.5 \
+  --curriculum-examples-per-label 1 --targeted-curriculum \
+  --output vision-artifacts/model-active/set-vision.ftsv
+```
+
+The browser regenerates each failed board with the production React/SVG renderer, applies the same
+screenshot cropping and area resampling as the extension, and streams normalized card tensors over
+stdout. The Rust trainer retains those tensors only in memory. `--curriculum-rate` is the probability
+that an optimizer step receives replay examples; it is not an evaluation weight.
+`--curriculum-examples-per-label` caps how many slots replay can replace in each label half. The
+default mixer replaces both labels symmetrically. `--targeted-curriculum` instead follows the
+observed error: a No-SET false positive supplies its proposed hard negative, a Has-SET false
+negative supplies a real positive, and a wrong proposal on a Has-SET board supplies both. The same
+flags and semantics are supported by the FrankenTorch reference trainer.
+
+Run a finite scoring-only audit with no curriculum input or feedback:
+
+```sh
+npm run test:vision-stream -- \
+  --audit --boards 10000 --seed 20260820 --report-every 250 \
+  --min-raw-accuracy 0.97
+```
+
+Miner accuracy is adaptive development telemetry and must not be reported as a holdout metric. Only
+an audit stream whose seed was fixed before evaluation is eligible for a generalization claim. A
+failure from an audit may be copied into the next development curriculum only after that audit has
+been retired.
+
 ## Load and use the extension
 
 1. Open `chrome://extensions`, enable Developer mode, and choose **Load unpacked**.

@@ -7,7 +7,9 @@ use ft_api::FrankenTorchSession;
 use ft_core::ExecutionMode;
 use ft_nn::{BCEWithLogitsLoss, CrossEntropyLoss, LossModule, Module};
 use ft_optim::{AdamW, Optimizer};
-use set_vision_data::{AtlasCollection, BoardKind, Rng, decode_card};
+use set_vision_data::{
+    AtlasCollection, BoardKind, CURRICULUM_RNG_SALT, RenderedBoardCollection, Rng, decode_card,
+};
 use set_vision_policy::{
     BoardDecision, BoardScores, CARD_PIXELS, DeployedVisualSetPolicy, RawBoardAction,
     ResearchVisualSetPolicy, WideTypedRelationResearchPolicy,
@@ -20,6 +22,8 @@ fn add_negative_logsumexp_loss(
     set_logits: ft_autograd::TensorNodeId,
     batch_size: usize,
     weight: f64,
+    negative_board_groups: usize,
+    count_correction: bool,
 ) -> Result<ft_autograd::TensorNodeId, ft_autograd::AutogradError> {
     if weight == 0.0 {
         return Ok(loss);
@@ -27,41 +31,71 @@ fn add_negative_logsumexp_loss(
     let negative_start = batch_size / 2;
     let negative_logits =
         session.tensor_narrow(set_logits, 0, negative_start, batch_size - negative_start)?;
-    let negative_logsumexp = session.tensor_logsumexp(negative_logits, 0)?;
-    let negative_target = session.tensor_variable(vec![0.0], vec![1], false)?;
+    let negatives_per_board = (batch_size - negative_start) / negative_board_groups;
+    let negative_logits = session.tensor_reshape(
+        negative_logits,
+        vec![negative_board_groups, negatives_per_board],
+    )?;
+    let mut negative_logsumexp = session.tensor_logsumexp(negative_logits, 1)?;
+    if count_correction {
+        let Ok(group_count) = u32::try_from(negative_board_groups) else {
+            unreachable!("negative board groups cannot exceed the batch size")
+        };
+        let correction = session.tensor_variable(
+            vec![f64::from(group_count).ln(); negative_board_groups],
+            vec![negative_board_groups],
+            false,
+        )?;
+        negative_logsumexp = session.tensor_add(negative_logsumexp, correction)?;
+    }
+    let negative_target = session.tensor_variable(
+        vec![0.0; negative_board_groups],
+        vec![negative_board_groups],
+        false,
+    )?;
     let aggregate_loss = BCEWithLogitsLoss.forward(session, negative_logsumexp, negative_target)?;
     let weighted_aggregate = session.tensor_mul_scalar(aggregate_loss, weight)?;
     session.tensor_add(loss, weighted_aggregate)
 }
 
-fn attribute_loss_with_fill_multiplier(
+fn attribute_loss_with_multipliers(
     session: &mut FrankenTorchSession,
     attribute_logits: ft_autograd::TensorNodeId,
     attribute_targets: ft_autograd::TensorNodeId,
     card_instances: usize,
+    shape_multiplier: f64,
     fill_multiplier: f64,
 ) -> Result<ft_autograd::TensorNodeId, ft_autograd::AutogradError> {
     let base_loss = CrossEntropyLoss.forward(session, attribute_logits, attribute_targets)?;
-    if (fill_multiplier - 1.0).abs() < f64::EPSILON {
+    if (shape_multiplier - 1.0).abs() < f64::EPSILON && (fill_multiplier - 1.0).abs() < f64::EPSILON
+    {
         return Ok(base_loss);
     }
     let logits = session.tensor_reshape(
         attribute_logits,
         vec![card_instances, set_vision_policy::ATTRIBUTE_COUNT, 3],
     )?;
+    let shape_logits = session.tensor_narrow(logits, 1, 2, 1)?;
+    let shape_logits = session.tensor_reshape(shape_logits, vec![card_instances, 3])?;
     let fill_logits = session.tensor_narrow(logits, 1, 3, 1)?;
     let fill_logits = session.tensor_reshape(fill_logits, vec![card_instances, 3])?;
     let targets = session.tensor_reshape(
         attribute_targets,
         vec![card_instances, set_vision_policy::ATTRIBUTE_COUNT],
     )?;
+    let shape_targets = session.tensor_narrow(targets, 1, 2, 1)?;
+    let shape_targets = session.tensor_reshape(shape_targets, vec![card_instances])?;
     let fill_targets = session.tensor_narrow(targets, 1, 3, 1)?;
     let fill_targets = session.tensor_reshape(fill_targets, vec![card_instances])?;
+    let shape_loss = CrossEntropyLoss.forward(session, shape_logits, shape_targets)?;
     let fill_loss = CrossEntropyLoss.forward(session, fill_logits, fill_targets)?;
-    let denominator = 3.0 + fill_multiplier;
+    let denominator = 2.0 + shape_multiplier + fill_multiplier;
     let base_loss = session.tensor_mul_scalar(base_loss, 4.0 / denominator)?;
+    let shape_loss =
+        session.tensor_mul_scalar(shape_loss, (shape_multiplier - 1.0) / denominator)?;
     let fill_loss = session.tensor_mul_scalar(fill_loss, (fill_multiplier - 1.0) / denominator)?;
-    session.tensor_add(base_loss, fill_loss)
+    let loss = session.tensor_add(base_loss, shape_loss)?;
+    session.tensor_add(loss, fill_loss)
 }
 
 #[derive(Debug)]
@@ -185,6 +219,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     };
     std::fs::create_dir_all(&config.output_dir)?;
+    let rendered_boards = if config.curriculum_stdin || config.browser_training_stdin {
+        let collection = RenderedBoardCollection::read_framed(std::io::stdin().lock())?;
+        println!("rendered_board_samples: {}", collection.len());
+        Some(collection)
+    } else {
+        println!("rendered_board_samples: 0");
+        None
+    };
     // Evaluation-only runs do not need the training corpus. Avoid loading it so
     // a shard process holds only its validation atlas in memory.
     let atlases = if config.eval_only && !config.probe_only {
@@ -194,6 +236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let validation_atlases = AtlasCollection::load(&config.validation_atlas_dir)?;
     let mut rng = Rng::new(config.seed);
+    let mut curriculum_rng = Rng::new(config.seed ^ CURRICULUM_RNG_SALT);
 
     let mut session = FrankenTorchSession::new(ExecutionMode::Strict);
     let model =
@@ -301,8 +344,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if config.probe_only {
         let atlases = atlases.as_ref().ok_or("probe requires an atlas corpus")?;
         let mut probe_rng = Rng::new(99005);
-        let batch = if config.board_correlated_negatives {
-            atlases.make_board_correlated_training_batch(&mut probe_rng, 64, false)
+        let batch = if config.board_correlated_negative_count > 0 {
+            atlases.make_sparse_board_correlated_training_batch(
+                &mut probe_rng,
+                64,
+                false,
+                config.board_correlated_negative_count,
+            )?
+        } else if config.board_correlated_negatives {
+            atlases.make_multi_board_correlated_training_batch(
+                &mut probe_rng,
+                64,
+                false,
+                config.negative_board_groups,
+            )?
         } else if config.negative_logsumexp_loss_weight > 0.0 {
             atlases.make_grouped_training_batch(&mut probe_rng, 64, false)
         } else {
@@ -317,11 +372,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let outputs = model.forward_with_relations(&mut session, input)?;
         let attribute_logits = session.tensor_reshape(outputs.attributes, vec![64 * 3 * 4, 3])?;
         let set_loss = BCEWithLogitsLoss.forward(&mut session, outputs.set, set_targets)?;
-        let attribute_loss = attribute_loss_with_fill_multiplier(
+        let attribute_loss = attribute_loss_with_multipliers(
             &mut session,
             attribute_logits,
             attribute_targets,
             64 * 3,
+            config.shape_loss_multiplier,
             config.fill_loss_multiplier,
         )?;
         let attribute_loss =
@@ -341,6 +397,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             outputs.set,
             64,
             config.negative_logsumexp_loss_weight,
+            config.negative_board_groups,
+            config.negative_group_count_correction,
         )?;
         println!("probe_loss: {:.9}", session.tensor_values(loss)?[0]);
         let _report = session.tensor_backward(loss)?;
@@ -364,21 +422,86 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.batch_size,
             config.atlas_dir.display()
         );
+        println!(
+            "board_correlated_negative_count: {}",
+            config.board_correlated_negative_count
+        );
+        println!(
+            "curriculum_rate: {}",
+            if config.curriculum_stdin {
+                config.curriculum_rate
+            } else {
+                0.0
+            }
+        );
+        println!(
+            "curriculum_examples_per_label: {}",
+            config
+                .curriculum_examples_per_label
+                .min(config.batch_size / 2)
+        );
+        println!("targeted_curriculum: {}", config.targeted_curriculum);
+        println!(
+            "browser_batch_rate: {}",
+            if config.browser_training_stdin {
+                config.browser_batch_rate
+            } else {
+                0.0
+            }
+        );
         for step in 1..=config.steps {
             let progress =
                 f64::from(u32::try_from(step - 1)?) / f64::from(u32::try_from(config.steps)?);
             let cosine = 1.0_f64.midpoint((std::f64::consts::PI * progress).cos());
             optimizer.set_lr(config.learning_rate * (0.05 + 0.95 * cosine));
-            let batch = if config.board_correlated_negatives {
-                atlases.make_board_correlated_training_batch(
+            let use_browser_batch =
+                config.browser_training_stdin && curriculum_rng.chance(config.browser_batch_rate);
+            let base_batch = if use_browser_batch {
+                rendered_boards
+                    .as_ref()
+                    .ok_or("missing rendered browser boards")?
+                    .make_balanced_training_batch(&mut curriculum_rng, config.batch_size)?
+            } else if config.board_correlated_negative_count > 0 {
+                atlases.make_sparse_board_correlated_training_batch(
                     &mut rng,
                     config.batch_size,
                     config.augment,
-                )
+                    config.board_correlated_negative_count,
+                )?
+            } else if config.board_correlated_negatives {
+                atlases.make_multi_board_correlated_training_batch(
+                    &mut rng,
+                    config.batch_size,
+                    config.augment,
+                    config.negative_board_groups,
+                )?
             } else if config.negative_logsumexp_loss_weight > 0.0 {
                 atlases.make_grouped_training_batch(&mut rng, config.batch_size, config.augment)
             } else {
                 atlases.make_training_batch(&mut rng, config.batch_size, config.augment)
+            };
+            let use_curriculum = config.curriculum_stdin
+                && rendered_boards
+                    .as_ref()
+                    .is_some_and(|_| curriculum_rng.chance(config.curriculum_rate));
+            let batch = if use_curriculum {
+                if config.targeted_curriculum {
+                    atlases.mix_targeted_curriculum_training_batch(
+                        rendered_boards.as_ref().ok_or("missing curriculum")?,
+                        &mut curriculum_rng,
+                        base_batch,
+                        config.curriculum_examples_per_label,
+                    )
+                } else {
+                    atlases.mix_curriculum_training_batch(
+                        rendered_boards.as_ref().ok_or("missing curriculum")?,
+                        &mut curriculum_rng,
+                        base_batch,
+                        config.curriculum_examples_per_label,
+                    )
+                }
+            } else {
+                base_batch
             };
             let input = session.tensor_variable(
                 batch.pixels,
@@ -401,11 +524,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let attribute_logits =
                 session.tensor_reshape(outputs.attributes, vec![config.batch_size * 3 * 4, 3])?;
             let set_loss = BCEWithLogitsLoss.forward(&mut session, outputs.set, set_targets)?;
-            let attribute_loss = attribute_loss_with_fill_multiplier(
+            let attribute_loss = attribute_loss_with_multipliers(
                 &mut session,
                 attribute_logits,
                 attribute_targets,
                 config.batch_size * 3,
+                config.shape_loss_multiplier,
                 config.fill_loss_multiplier,
             )?;
             let attribute_loss =
@@ -426,6 +550,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 outputs.set,
                 config.batch_size,
                 config.negative_logsumexp_loss_weight,
+                config.negative_board_groups,
+                config.negative_group_count_correction,
             )?;
             let loss_value = session.tensor_values(loss)?[0];
             let report = session.tensor_backward(loss)?;

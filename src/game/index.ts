@@ -40,6 +40,7 @@ export {
   shuffle,
   generateModeA,
   generateModeB,
+  generateNoSetBoard,
   generateBoard,
 } from './board'
 

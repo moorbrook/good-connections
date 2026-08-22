@@ -1,7 +1,13 @@
 #![forbid(unsafe_code)]
 
+#[cfg(not(feature = "high-resolution"))]
 pub const CARD_WIDTH: usize = 30;
+#[cfg(feature = "high-resolution")]
+pub const CARD_WIDTH: usize = 60;
+#[cfg(not(feature = "high-resolution"))]
 pub const CARD_HEIGHT: usize = 21;
+#[cfg(feature = "high-resolution")]
+pub const CARD_HEIGHT: usize = 42;
 pub const CHANNELS: usize = 3;
 pub const CARD_PIXELS: usize = CARD_WIDTH * CARD_HEIGHT * CHANNELS;
 pub const ATTRIBUTE_COUNT: usize = 4;
