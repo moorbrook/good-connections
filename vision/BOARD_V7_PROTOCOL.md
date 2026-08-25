@@ -141,6 +141,22 @@ the fixed sealed-board allocation 3,334 / 3,333 / 3,333 for seeds 16001 /
 not open the sealed corpus or create sealed predictions before a candidate has
 cleared the research gate.
 
+Before the first sealed evaluation, the eligible research winner fixed the
+following sealed allocation. These seeds and weights are assessment inputs and
+must not be changed after seeing the result:
+
+| atlas seed | triple seed | board seed | triple batches | raw boards |
+| ---: | ---: | ---: | ---: | ---: |
+| 16001 | 177145488695121 | 194222009835345 | 342 | 3,334 |
+| 16002 | 177145488695122 | 194222009835346 | 341 | 3,333 |
+| 16003 | 177145488695123 | 194222009835347 | 341 | 3,333 |
+| **total** |  |  | **1,024** | **10,000** |
+
+The selected four-checkpoint raw ensemble weights are `0.44 / 0.36 / 0.10 /
+0.10`. `tools/evaluate-board-v7-sealed-winner.sh` hard-codes both the weights
+and this allocation, verifies the sealed digest, and refuses a non-empty output
+directory.
+
 This protocol supports only finite-distribution claims such as “at least 99%
 raw accuracy at full coverage in 8,192 research boards” or “0 failures in
 10,000 sealed boards.” It is not a claim of universal 100% reliability, and the adversarial profiles are not
