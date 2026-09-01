@@ -1,5 +1,7 @@
 import { supabase } from './supabase'
 import { generateBoard, mulberry32, type Board, type Mode } from '../game/board'
+import { timeSpread, type TimeSpread } from '../game/pace'
+import { zonedDateISO } from './time'
 import {
   deriveStats,
   summarisePlayer,
@@ -42,11 +44,51 @@ export async function getMyLeagues(): Promise<League[]> {
   return leagues
 }
 
+/**
+ * The league's members, in join order — the order chart colours are assigned
+ * from, so it must stay append-only (see ui/playerColour).
+ *
+ * Returns null rather than throwing if the `league_members()` function is not
+ * installed on the database yet. Every caller treats null as "roster unknown"
+ * and degrades: colours fall back to a stable sort, and the set-card reveal
+ * falls back to waiting for the day to close. A missing migration should soften
+ * two features, not break the results page.
+ */
+export async function getLeagueRoster(leagueId: string): Promise<string[] | null> {
+  const { data, error } = await supabase.rpc('league_members', { p_league: leagueId })
+  if (error) return null
+  const ids = (data ?? []) as unknown
+  if (!Array.isArray(ids)) return null
+  // The RPC returns a setof uuid, which supabase-js hands back as bare strings.
+  return ids.map((v) => String(v))
+}
+
 /** Join a league by its code; returns the league id. */
 export async function joinLeague(code: string): Promise<string> {
   const { data, error } = await supabase.rpc('join_league', { code: code.trim() })
   if (error) throw new Error(error.message)
   return data as string
+}
+
+/**
+ * Every date this league has games on record for, newest first.
+ *
+ * RLS already lets a member read their league's records, so this needs no new
+ * policy. It returns the raw list INCLUDING today — deciding what a given
+ * member may actually look at is {@link viewableDates}'s job, kept separate so
+ * the "today is not safe until you've played it" rule has one home.
+ */
+export async function getLeagueDates(leagueId: string): Promise<string[]> {
+  const { data, error } = await supabase
+    .from('game_records')
+    .select('puzzle_date')
+    .eq('context', 'league')
+    .eq('league_id', leagueId)
+  if (error) throw new Error(error.message)
+  const dates = ((data ?? []) as { puzzle_date: string }[])
+    .map((r) => r.puzzle_date)
+    .filter((d): d is string => typeof d === 'string')
+  return [...new Set(dates)].sort((a, b) => b.localeCompare(a))
 }
 
 export interface TodayPuzzle {
@@ -64,6 +106,25 @@ export async function getTodayPuzzle(leagueId: string): Promise<TodayPuzzle> {
   const seed = Number(row.seed)
   const board = generateBoard(row.mode, mulberry32(seed))
   return { seed, puzzleDate: row.puzzle_date, mode: row.mode, board }
+}
+
+/**
+ * Rebuild the board for a league day that is already over.
+ *
+ * Returns null when the day cannot be redrawn — no `past_puzzle()` function
+ * installed, nobody ever played that day so no seed was issued, or the server
+ * refused because the date is not actually finished. Every caller treats null
+ * as "no cards for this day" and still shows the rest of the summary, so this
+ * never has to be the difference between a page and an error.
+ */
+export async function getPastPuzzleBoard(leagueId: string, puzzleDate: string): Promise<Board | null> {
+  const { data, error } = await supabase.rpc('past_puzzle', {
+    p_league: leagueId,
+    p_date: puzzleDate,
+  })
+  if (error || data === null || data === undefined) return null
+  const row = data as { seed: number; mode: Mode }
+  return generateBoard(row.mode, mulberry32(Number(row.seed)))
 }
 
 /** Post a completed/abandoned league game's event log to the server. */
@@ -151,6 +212,12 @@ export interface MemberStat {
   gamesCompleted: number
   completionRate: number
   bestTimeMs: number | null
+  /** Best/worst/mean/std-dev over COMPLETED games only — abandoned games have
+   * a shorter elapsed time, so including them would reward giving up. Null
+   * until the member has finished at least one. */
+  spread: TimeSpread | null
+  /** Total penalty time this member has been charged across the league. */
+  penaltyMs: number
   /** Consecutive calendar days completed, ending at the member's latest. */
   currentStreak: number
 }
@@ -252,13 +319,18 @@ export async function getLeagueStats(leagueId: string, mode: Mode): Promise<Leag
   const members: MemberStat[] = [...byUser.entries()]
     .map(([userId, gs]) => {
       const comp = gs.filter((g) => g.stats.completed && g.stats.totalTimeMs !== null)
+      const spread = timeSpread(comp.map((g) => g.stats.totalTimeMs!))
       return {
         userId,
         displayName: names.get(userId) ?? '—',
         gamesPlayed: gs.length,
         gamesCompleted: comp.length,
         completionRate: gs.length > 0 ? comp.length / gs.length : 0,
-        bestTimeMs: comp.length > 0 ? Math.min(...comp.map((g) => g.stats.totalTimeMs!)) : null,
+        bestTimeMs: spread?.bestMs ?? null,
+        spread,
+        // Every game, not just completed ones: a penalty was really paid even
+        // in a game the player went on to abandon.
+        penaltyMs: gs.reduce((acc, g) => acc + g.stats.penaltyMs, 0),
         currentStreak: currentStreak(comp.map((g) => g.date)),
       }
     })
@@ -372,6 +444,58 @@ export async function getPlayerHistory(
     games,
     summary: summarisePlayer(records, 'league', mode),
   }
+}
+
+/**
+ * For each league, whether the signed-in user has already played its CURRENT
+ * puzzle — so the menu can show at a glance which leagues have a fresh game
+ * waiting.
+ *
+ * The league-local date is computed client-side with the same rule the server
+ * uses in today_puzzle() (`(now() at time zone tz)::date`), which is what makes
+ * a league with a non-midnight rollover come out right: CORSICA's day turns at
+ * 6pm US Eastern, not at the viewer's midnight.
+ *
+ * One query for every league rather than one each. A league whose timezone the
+ * browser cannot parse is reported as unplayed — "there might be a game" is the
+ * harmless direction to be wrong in.
+ */
+export async function getPlayedToday(
+  leagues: readonly { id: string; timezone: string }[],
+): Promise<Record<string, boolean>> {
+  const out: Record<string, boolean> = {}
+  const dates = new Map<string, string>()
+  for (const l of leagues) {
+    const d = zonedDateISO(l.timezone, Date.now())
+    out[l.id] = false
+    if (d !== null) dates.set(l.id, d)
+  }
+  if (dates.size === 0) return out
+
+  const { data: userData } = await supabase.auth.getUser()
+  const userId = userData.user?.id
+  if (!userId) return out
+
+  const { data, error } = await supabase
+    .from('game_records')
+    .select('league_id, puzzle_date')
+    .eq('context', 'league')
+    .eq('user_id', userId)
+    .in('league_id', [...dates.keys()])
+    .in('puzzle_date', [...new Set(dates.values())])
+  if (error) return out
+
+  // Two leagues can share a date, so match on the PAIR — filtering by the two
+  // `in` lists separately would mark a league played on another league's date.
+  const played = new Set(
+    ((data ?? []) as { league_id: string; puzzle_date: string }[]).map(
+      (r) => `${r.league_id}|${r.puzzle_date}`,
+    ),
+  )
+  for (const [leagueId, date] of dates) {
+    out[leagueId] = played.has(`${leagueId}|${date}`)
+  }
+  return out
 }
 
 /** Has the signed-in user already submitted a game for this league + date? */

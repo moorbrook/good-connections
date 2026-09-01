@@ -112,6 +112,12 @@ created, store it, and serve that stored board to every member. Never
 regenerate per player. Store the solution alongside it and **never send
 the solution to the client.**
 
+A curiosity about this generator, worth reading before changing the RNG:
+because `mulberry32` advances its state by a constant, every seed walks the
+same 2³² cycle and only picks a starting offset on it — so Mode A can reach
+only ~5.3×10⁷ distinct boards, not the 2×10⁹ its seed space implies. Harmless
+at league scale, and measured in [`docs/board-diversity.md`](docs/board-diversity.md).
+
 ## Practice mode
 
 Alongside league play there is **practice**: unlimited puzzles, on

@@ -65,6 +65,37 @@ export function nextMidnightMs(timezone: string, nowMs: number): number | null {
 }
 
 /**
+ * The current local date in `timezone`, as YYYY-MM-DD. Null for an
+ * unrecognised zone, matching {@link nextMidnightMs}.
+ *
+ * This is the same date `today_puzzle()` computes server-side with
+ * `(now() at time zone tz)::date`, so comparing it against a stored
+ * `puzzle_date` is how the client tells whether a day's slot has closed.
+ */
+export function zonedDateISO(timezone: string, atMs: number): string | null {
+  try {
+    const p = zonedParts(timezone, atMs)
+    const pad = (n: number) => n.toString().padStart(2, '0')
+    return `${p.year}-${pad(p.month)}-${pad(p.day)}`
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Has the league's slot for `puzzleDate` closed — i.e. has a later puzzle
+ * already started in the league's own timezone?
+ *
+ * Answers false (the cautious direction) for an unknown zone: anything gated on
+ * this reveals a solution, so a bad league row must keep it hidden rather than
+ * open it up.
+ */
+export function isSlotClosed(timezone: string, puzzleDate: string, nowMs: number): boolean {
+  const today = zonedDateISO(timezone, nowMs)
+  return today === null ? false : today > puzzleDate
+}
+
+/**
  * A countdown as coarse text: hours+minutes while there is an hour to go,
  * minutes+seconds inside the last hour. Never shows a bare "0".
  */

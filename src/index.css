@@ -233,29 +233,70 @@ body {
   flex-direction: column;
   gap: 10px;
 }
+/* The card is a container, not a button: an unplayed league carries a second
+   action ("Past results"), and a button inside a button is invalid HTML. */
 .league-card {
-  text-align: left;
   display: flex;
-  flex-direction: column;
-  gap: 3px;
+  align-items: center;
+  gap: 8px;
   background: var(--bg);
   border: 1px solid var(--card-border);
   border-radius: 12px;
   padding: 14px 16px;
   color: var(--text);
+  transition: border-color 0.15s ease;
+}
+.league-card-main {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
   cursor: pointer;
   font: inherit;
-  transition: border-color 0.15s ease, transform 0.1s ease;
+  transition: transform 0.1s ease;
+}
+.league-card-alt {
+  flex: none;
+  white-space: nowrap;
 }
 .league-card:hover {
   border-color: var(--accent);
 }
-.league-card:active {
+.league-card-main:active {
   transform: translateY(1px);
+}
+/* A league with a game waiting is lit; one you've already played today recedes.
+   The dot repeats the signal non-chromatically — the card colours in this app
+   already carry meaning, so colour alone would be a poor sole cue. */
+.league-card.is-fresh {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+}
+.league-card.is-played {
+  opacity: 0.72;
+}
+.league-card.is-played .league-meta {
+  color: var(--muted);
 }
 .league-name {
   font-weight: 700;
   font-size: 16px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.league-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
 }
 .league-meta {
   color: var(--accent);
@@ -454,20 +495,18 @@ body {
   font-size: 10px;
   text-anchor: middle;
 }
-.pc-donelabel {
-  font-size: 9px;
-  font-style: italic;
-}
 .pc-wrong {
   fill: var(--bad);
 }
 .pc-repeat {
   fill: var(--warn);
 }
-.pc-premdone {
-  fill: none;
-  stroke: var(--bad);
-  stroke-width: 1.5;
+/* Tappable chart elements. The transparent hit circles/rects inside these are
+   what actually catch the touch — the visible dot is far too small a target. */
+.pc-hit,
+.pc-riser {
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
 .pace-legend {
   display: flex;
@@ -491,6 +530,26 @@ body {
   height: 11px;
   border-radius: 3px;
   display: inline-block;
+}
+.pace-key-pen {
+  color: var(--bad);
+  font-variant-numeric: tabular-nums;
+}
+/* The tap-detail line. Reserves its own height whether or not anything is
+   selected, so tapping a point never reflows the chart out from under the
+   finger that just tapped it. */
+.pace-detail {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 20px;
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.pace-detail.is-shown {
+  color: var(--text);
 }
 .pace-caption {
   font-size: 12px;
@@ -571,6 +630,15 @@ body {
 .leader-result {
   font-variant-numeric: tabular-nums;
   font-weight: 700;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.25;
+}
+.leader-penalty {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--bad);
 }
 
 /* ---- menu ---- */
@@ -911,6 +979,103 @@ body {
   border-radius: 14px;
   padding: 10px;
   max-width: 340px;
+}
+/* ---- day picker on the results page ---- */
+.day-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+.day-select {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  color: var(--text);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  padding: 9px 10px;
+}
+.day-nav .btn[disabled] {
+  opacity: 0.35;
+}
+
+/* ---- Mode A solve-time table ---- */
+/* Six columns is wide for a phone, so the table scrolls inside its own box
+   rather than making the whole page scroll sideways. */
+.stat-table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  background: var(--surface);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+}
+.stat-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.stat-table th,
+.stat-table td {
+  padding: 8px 10px;
+  text-align: right;
+  white-space: nowrap;
+}
+.stat-table thead th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  font-weight: 600;
+  border-bottom: 1px solid var(--card-border);
+}
+/* The player column is the row's label: left-aligned, and it stays put while
+   the numbers scroll under it. */
+.stat-table th[scope='row'],
+.stat-table thead th:first-child {
+  text-align: left;
+  position: sticky;
+  left: 0;
+  background: var(--surface);
+  font-weight: 600;
+}
+.stat-table tbody tr.is-you th[scope='row'],
+.stat-table tbody tr.is-you td {
+  color: var(--text);
+  font-weight: 700;
+}
+.stat-table tbody tr + tr th,
+.stat-table tbody tr + tr td {
+  border-top: 1px solid var(--card-border);
+}
+
+/* The day's sets, revealed once nobody can be leaked to. Two columns on a
+   phone so all six fit without a long scroll; the letter ties each back to the
+   A/B/C used in the match notes above. */
+.set-reveal {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+.set-reveal-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.set-reveal-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+}
+.set-reveal .missed-set {
+  gap: 4px;
+  padding: 6px;
+  max-width: none;
 }
 .summary-actions {
   display: flex;

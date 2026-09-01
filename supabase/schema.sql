@@ -174,3 +174,78 @@ begin
   return json_build_object('seed', s, 'puzzle_date', d, 'mode', m);
 end;
 $$;
+
+-- ===========================================================================
+-- league_members: the roster of one league, for members of that league only.
+--
+-- The memberships policy above is deliberately "your own rows only", so a
+-- member cannot otherwise see who else is in their league. Two features need
+-- the roster: stable per-player chart colours (assigned from the full roster,
+-- so a colour does not shift on days someone is absent) and the "everyone has
+-- played" gate that decides when a day's set cards become safe to show.
+--
+-- Returns bare user ids for a league the caller already belongs to, and
+-- nothing else -- members can already read each other's display names and
+-- game records, so this leaks nothing new. Zero rows for a league you are not
+-- in, rather than an error.
+-- ===========================================================================
+create or replace function league_members (p_league uuid)
+  returns setof uuid
+  language sql
+  security definer
+  set search_path = public
+as $$
+  select m.user_id
+  from memberships m
+  where m.league_id = p_league
+    and exists (
+      select 1 from memberships self
+      where self.league_id = p_league and self.user_id = auth.uid()
+    )
+  -- Join order, NOT user_id order: the client assigns chart colours by position
+  -- here, so a new member must append rather than reshuffle everyone after them.
+  order by m.joined_at, m.user_id;
+$$;
+
+-- ===========================================================================
+-- past_puzzle: the seed for a league day that is already OVER, so the history
+-- browser can redraw a finished board.
+--
+-- today_puzzle() only ever issues TODAY's seed and daily_seeds has no SELECT
+-- policy, which keeps future puzzles unguessable but also puts finished boards
+-- out of reach. This restores the finished ones and nothing else: p_date >=
+-- today is refused, so today's board still comes only from today_puzzle() and
+-- tomorrow's stays unreachable. Members only.
+-- ===========================================================================
+create or replace function past_puzzle (p_league uuid, p_date date)
+  returns json
+  language plpgsql
+  security definer
+  set search_path = public
+as $$
+declare
+  tz text;
+  m text;
+  s bigint;
+  today date;
+begin
+  select timezone, mode into tz, m from leagues where id = p_league;
+  if tz is null then
+    raise exception 'no such league';
+  end if;
+  if not exists (
+    select 1 from memberships where league_id = p_league and user_id = auth.uid()
+  ) then
+    raise exception 'not a member of this league';
+  end if;
+  today := (now() at time zone tz)::date;
+  if p_date >= today then
+    raise exception 'that puzzle is not finished yet';
+  end if;
+  select seed into s from daily_seeds where league_id = p_league and puzzle_date = p_date;
+  if s is null then
+    return null;
+  end if;
+  return json_build_object('seed', s, 'puzzle_date', p_date, 'mode', m);
+end;
+$$;

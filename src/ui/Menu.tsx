@@ -18,7 +18,7 @@ interface MenuProps {
   auth: AuthState
   onSignIn: () => void
   onSignOut: () => void
-  onSelectLeague: (league: League) => void
+  onSelectLeague: (league: League, intent?: 'play' | 'standings') => void
 }
 
 function AuthBar({

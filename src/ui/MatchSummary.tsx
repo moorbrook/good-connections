@@ -1,5 +1,7 @@
+import type { Board } from '../game/board'
 import { matchHighlights } from '../game/telemetry'
 import type { LeaderboardRow } from '../lib/leagues'
+import { Card } from './Card'
 import { formatTime, setLabel } from './format'
 
 /**
@@ -33,12 +35,49 @@ function consensus(indices: number[]): { label: string; count: number } | null {
   return top !== null && top[1] >= 2 ? { label: setLabel(top[0]), count: top[1] } : null
 }
 
+/**
+ * Whether it is safe to show the day's actual sets.
+ *
+ * Two ways in, and both are genuinely closed:
+ *   - every member has played, so there is nobody left to leak to; or
+ *   - the day's slot has rolled over, so the board is history.
+ *
+ * The second is what stops a day staying locked forever because one member was
+ * away — the first alone would do that. If the roster could not be read the
+ * "everyone played" test is unavailable, and this falls back to waiting for the
+ * slot to close, which is the cautious direction.
+ */
+export type RevealReason = 'all-played' | 'slot-closed'
+
+export function canRevealSets(args: {
+  playedUserIds: readonly string[]
+  roster: readonly string[] | null
+  slotClosed: boolean
+}): RevealReason | null {
+  // "Everyone played" is checked first so the caption can say the true reason
+  // on a day that satisfies both.
+  if (args.roster && args.roster.length > 0) {
+    const played = new Set(args.playedUserIds)
+    if (args.roster.every((id) => played.has(id))) return 'all-played'
+  }
+  return args.slotClosed ? 'slot-closed' : null
+}
+
 export function MatchSummary({
   rows,
   currentUserId,
+  board,
+  reveal = null,
+  historic = false,
 }: {
   rows: LeaderboardRow[]
   currentUserId: string
+  /** A finished day rather than today's live one. */
+  historic?: boolean
+  /** Today's board. Only needed to draw the sets once they may be revealed. */
+  board?: Board | null
+  /** Caller's verdict from {@link canRevealSets}; null keeps the cards hidden. */
+  reveal?: RevealReason | null
 }) {
   const played = rows.map((r) => ({ row: r, high: matchHighlights(r.events) }))
   const entries: Entry[] = played.map(({ row, high }) => ({
@@ -62,7 +101,7 @@ export function MatchSummary({
 
   return (
     <section className="league-stats">
-      <h2 className="section-label">Today’s match</h2>
+      <h2 className="section-label">{historic ? 'The match' : 'Today’s match'}</h2>
 
       {(wall || lastToFall) && (
         <p className="match-note">
@@ -106,9 +145,36 @@ export function MatchSummary({
         ))}
       </ol>
 
+      {reveal && board && (
+        <div className="set-reveal">
+          {board.sets.map((set, si) => (
+            <div className="set-reveal-item" key={si}>
+              <span className="set-reveal-label">{setLabel(si)}</span>
+              <div className="missed-set">
+                {set.map((ci) => (
+                  <div className="mini-card" key={ci}>
+                    <Card card={board.cards[ci]!} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       <p className="muted timeline-hint">
         Sets are lettered by their place in the board’s solution — the same letter is the same set
-        for everyone. The cards stay hidden while the day is live.
+        for everyone.
+        {/* Three states, not two: the gate can be open while the board is
+            still unavailable (a finished day whose seed cannot be fetched),
+            and saying "hidden while the day is live" there would be a lie. */}
+        {!reveal
+          ? ' The cards stay hidden while the day is live.'
+          : board
+            ? reveal === 'all-played'
+              ? ' Everyone has played, so here they are.'
+              : ' The day is over, so here they are.'
+            : ''}
       </p>
     </section>
   )

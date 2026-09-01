@@ -25,7 +25,14 @@ type LeagueView =
   | { phase: 'loading'; league: League }
   | { phase: 'error'; league: League; message: string }
   | { phase: 'play'; league: League; puzzle: TodayPuzzle; userId: string }
-  | { phase: 'result'; league: League; puzzleDate: string; userId: string }
+  | {
+      phase: 'result'
+      league: League
+      puzzleDate: string
+      userId: string
+      /** False = arrived via "Standings" without playing; today stays hidden. */
+      playedToday: boolean
+    }
 
 export function App() {
   const auth = useAuth()
@@ -56,15 +63,28 @@ export function App() {
     saveCardTheme(theme)
   }, [])
 
-  const selectLeague = useCallback(async (l: League) => {
+  /**
+   * Open a league. `intent: 'standings'` goes to the results page WITHOUT
+   * playing, so history is reachable on a day you haven't played — which it
+   * previously was not, since the only route to the results page ran through
+   * having already played. LeagueResult keeps today out of the date picker in
+   * that case, so this is a read-only look at finished days.
+   */
+  const selectLeague = useCallback(async (l: League, intent: 'play' | 'standings' = 'play') => {
     setLeague({ phase: 'loading', league: l })
     try {
       const puzzle = await getTodayPuzzle(l.id)
       const played = await hasPlayedToday(l.id, puzzle.puzzleDate)
       const { data } = await supabase.auth.getUser()
       const userId = data.user?.id ?? ''
-      if (played) {
-        setLeague({ phase: 'result', league: l, puzzleDate: puzzle.puzzleDate, userId })
+      if (played || intent === 'standings') {
+        setLeague({
+          phase: 'result',
+          league: l,
+          puzzleDate: puzzle.puzzleDate,
+          userId,
+          playedToday: played,
+        })
       } else {
         setLeague({ phase: 'play', league: l, puzzle, userId })
       }
@@ -123,6 +143,7 @@ export function App() {
           timezone={league.league.timezone}
           mode={league.league.mode}
           userId={league.userId}
+          playedToday={league.playedToday}
           onExit={exitLeague}
         />,
       )

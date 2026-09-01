@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { MatchSummary } from './MatchSummary'
+import { canRevealSets, MatchSummary } from './MatchSummary'
 import { deriveStats, type GameRecord, type TelemetryEvent } from '../game/telemetry'
 import type { LeaderboardRow } from '../lib/leagues'
 
@@ -106,5 +106,123 @@ describe('MatchSummary', () => {
     expect(renderToStaticMarkup(<MatchSummary rows={[row('aoife', [])]} currentUserId="aoife" />)).toBe(
       '',
     )
+  })
+})
+
+/**
+ * The reveal gate. Everyone in a league plays the same board, so showing the
+ * solution to someone while another member still has the day ahead of them
+ * hands over something they can pass on. These are the cases that must stay
+ * shut.
+ */
+describe('canRevealSets', () => {
+  const roster = ['alice', 'bob', 'carol']
+
+  it('stays shut while a member has not played', () => {
+    expect(
+      canRevealSets({ playedUserIds: ['alice', 'bob'], roster, slotClosed: false }),
+    ).toBeNull()
+  })
+
+  it('opens once every member has played, even mid-day', () => {
+    expect(
+      canRevealSets({ playedUserIds: ['alice', 'bob', 'carol'], roster, slotClosed: false }),
+    ).toBe('all-played')
+  })
+
+  it('opens when the day rolls over, even if someone never played', () => {
+    // Otherwise one absent member locks that day's board forever.
+    expect(canRevealSets({ playedUserIds: ['alice'], roster, slotClosed: true })).toBe(
+      'slot-closed',
+    )
+  })
+
+  it('names "all played" when both gates are open, since that is the real reason', () => {
+    expect(
+      canRevealSets({ playedUserIds: roster, roster, slotClosed: true }),
+    ).toBe('all-played')
+  })
+
+  it('stays shut when the roster is unknown and the day is live', () => {
+    // league_members() not installed: the "everyone played" test is
+    // unavailable, so fall back to waiting for the slot. Failing open here
+    // would leak the board to whoever finished first.
+    expect(canRevealSets({ playedUserIds: ['alice'], roster: null, slotClosed: false })).toBeNull()
+  })
+
+  it('still opens on slot close when the roster is unknown', () => {
+    expect(canRevealSets({ playedUserIds: ['alice'], roster: null, slotClosed: true })).toBe(
+      'slot-closed',
+    )
+  })
+
+  it('treats an empty roster as unknown rather than “everyone has played”', () => {
+    // [] would vacuously satisfy every(), which would open the gate on day one
+    // of a league before anyone joined. That must not count.
+    expect(canRevealSets({ playedUserIds: [], roster: [], slotClosed: false })).toBeNull()
+  })
+
+  it('is not fooled by a non-member having played', () => {
+    expect(
+      canRevealSets({
+        playedUserIds: ['alice', 'bob', 'stranger'],
+        roster,
+        slotClosed: false,
+      }),
+    ).toBeNull()
+  })
+})
+
+describe('MatchSummary set reveal', () => {
+  const rows = [row('MDS', [[1_000, 0]]), row('Telemattic', [[2_000, 1]])]
+  const board = {
+    mode: 'A' as const,
+    cards: Array.from({ length: 12 }, (_, i) => ({
+      count: (i % 3) + 1,
+      colour: ['red', 'green', 'purple'][i % 3],
+      shape: ['diamond', 'squiggle', 'oval'][i % 3],
+      fill: ['solid', 'striped', 'open'][i % 3],
+      id: i,
+    })),
+    sets: [
+      [0, 1, 2],
+      [3, 4, 5],
+    ],
+    attempts: 1,
+  }
+
+  it('draws no cards while the day is live', () => {
+    const svg = renderToStaticMarkup(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      <MatchSummary rows={rows} currentUserId="MDS" board={board as any} reveal={null} />,
+    )
+    expect(svg).not.toContain('set-reveal')
+    expect(svg).toContain('stay hidden while the day is live')
+  })
+
+  it('draws the lettered sets once the gate opens', () => {
+    const svg = renderToStaticMarkup(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      <MatchSummary rows={rows} currentUserId="MDS" board={board as any} reveal="all-played" />,
+    )
+    expect(svg).toContain('set-reveal')
+    expect(svg).toContain('Everyone has played')
+    // Two sets, three cards each.
+    expect(svg.match(/mini-card/g)?.length).toBe(6)
+  })
+
+  it('says the day is over when that was the reason', () => {
+    const svg = renderToStaticMarkup(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      <MatchSummary rows={rows} currentUserId="MDS" board={board as any} reveal="slot-closed" />,
+    )
+    expect(svg).toContain('The day is over')
+  })
+
+  it('does not break when the gate is open but the board has not loaded', () => {
+    const svg = renderToStaticMarkup(
+      <MatchSummary rows={rows} currentUserId="MDS" board={null} reveal="all-played" />,
+    )
+    expect(svg).not.toContain('set-reveal')
   })
 })

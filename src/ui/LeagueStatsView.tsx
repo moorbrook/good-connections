@@ -67,6 +67,61 @@ export function LeagueStatsView({ leagueId, mode, currentUserId, onSelectMember 
         </ol>
       )}
 
+      {/* Mode A only, deliberately. Every Mode A board has exactly six sets, so
+          times are comparable and an average means something. Mode B and C
+          boards vary in difficulty, where a season-long average mostly measures
+          which boards you happened to be dealt. */}
+      {mode === 'A' && (
+        <>
+          <h2 className="section-label section-label-gap">Solve times</h2>
+          {stats.members.every((m) => m.spread === null) ? (
+            <p className="muted">No completed solves yet.</p>
+          ) : (
+            <div className="stat-table-scroll">
+              <table className="stat-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Player</th>
+                    <th scope="col">Best</th>
+                    <th scope="col">Avg</th>
+                    <th scope="col">Worst</th>
+                    <th scope="col" title="Standard deviation — lower is more consistent">
+                      ±
+                    </th>
+                    <th scope="col">Games</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stats.members
+                    .filter((m) => m.spread !== null)
+                    .map((m) => (
+                      <tr
+                        key={m.userId}
+                        className={m.userId === currentUserId ? 'is-you' : undefined}
+                      >
+                        <th scope="row">
+                          {m.displayName}
+                          {m.userId === currentUserId ? ' (you)' : ''}
+                        </th>
+                        <td>{formatTime(m.spread!.bestMs)}</td>
+                        <td>{formatTime(m.spread!.meanMs)}</td>
+                        <td>{formatTime(m.spread!.worstMs)}</td>
+                        <td>{formatTime(m.spread!.stdDevMs)}</td>
+                        <td>{m.spread!.count}</td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <p className="muted timeline-hint">
+            Completed games only — an abandoned game is shorter than a finished one, so counting
+            them would make giving up look fast. ± is the standard deviation: lower means more
+            consistent.
+          </p>
+        </>
+      )}
+
       <h2 className="section-label section-label-gap">Members</h2>
       <ol className="member-list">
         {stats.members.map((m) => (
@@ -84,6 +139,7 @@ export function LeagueStatsView({ leagueId, mode, currentUserId, onSelectMember 
                 {m.bestTimeMs === null ? 'no solve yet' : `best ${formatTime(m.bestTimeMs)}`}
                 {` · ${m.gamesCompleted}/${m.gamesPlayed} solved · ${Math.round(m.completionRate * 100)}%`}
                 {m.currentStreak > 0 ? ` · streak ${m.currentStreak}` : ''}
+                {m.penaltyMs > 0 ? ` · +${formatTime(m.penaltyMs)} penalties` : ''}
               </span>
             </button>
           </li>
