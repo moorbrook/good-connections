@@ -1,5 +1,13 @@
 # Set — league play with solve telemetry
 
+## Current state of this fork
+
+Supabase auth (`src/ui/useAuth.ts`), a league schema (`supabase/schema.sql`)
+and league UI (`src/ui/LeaguesPanel.tsx`) already exist, so the slice-1-only
+and no-backend lines below describe the original plan, not the current code.
+Boards are generated client-side by `generateBoard()` from a per-league daily
+seed (`daily_seeds`, `today_puzzle()`), not server-side.
+
 ## What this is
 
 A web app for playing the card game Set, aimed at a small group of
@@ -34,7 +42,8 @@ rewrite.
 **Slice 3 (later): leagues, shared boards, cross-player comparison.**
 
 If you think something in slice 1 is being designed in a way that will
-block slices 2 or 3, say so before writing the code.
+block slices 2 or 3, say so in a sentence and keep building under the
+stated assumption.
 
 ## Game rules — canonical
 
@@ -286,5 +295,6 @@ people who know each other. Do not build more than that.
   structural so I can roll back.
 - Ask before adding a dependency. This project should stay close to
   vanilla; a card game does not need a state management library.
-- If a requirement here is ambiguous, ask rather than guessing. The
-  six-set board question above is the known one — there may be others.
+- If a requirement here is ambiguous, implement the reading this document
+  most directly supports and state the assumption. The six-set board
+  question above is the known one — there may be others.
